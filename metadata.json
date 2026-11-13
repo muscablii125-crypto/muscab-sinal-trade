@@ -1,0 +1,6 @@
+{
+  "name": "MUSCAB CRT PRO",
+  "description": "Advanced Forex Signal Analysis App using custom multi-timeframe CRT strategy (Monthly, Weekly, 1H, 5M) for XAUUSD, AUDUSD, and NASDAQ.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

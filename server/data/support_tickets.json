@@ -1,0 +1,19 @@
+[
+  {
+    "id": "TCK-MW99QH6I",
+    "userEmail": "trader1@gmail.com",
+    "userName": "Ahmed Trader",
+    "category": "BUG_REPORT",
+    "subject": "AUD/USD 5M Trend Line Drawing Sync Test",
+    "message": "Tested drawing manual diagonal trend line on 5M timeframe. Works great!",
+    "systemDiagnostics": {
+      "instrument": "AUDUSD",
+      "broker": "OANDA_MT5",
+      "timeframe": "5M",
+      "connectionStatus": "LIVE_CONNECTED"
+    },
+    "targetEmail": "muscablii125@gmail.com",
+    "createdAt": 1794229192314,
+    "status": "OPEN"
+  }
+]

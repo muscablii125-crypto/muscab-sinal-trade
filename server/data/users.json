@@ -1,0 +1,28 @@
+[
+  {
+    "id": "usr_google_1794229172586_aed3c9ff",
+    "email": "muscablii125@gmail.com",
+    "name": "Muscab Mohamed",
+    "avatarUrl": "https://api.dicebear.com/7.x/initials/svg?seed=Muscab%20Mohamed&backgroundColor=10b981&textColor=090a0f",
+    "provider": "google",
+    "createdAt": 1794229172586,
+    "lastLogin": 1794229172587,
+    "emailVerified": true,
+    "tier": "CRT_INSTITUTIONAL_PRO",
+    "preferredBroker": "OANDA_MT5"
+  },
+  {
+    "id": "usr_1794229176715_86d3359c",
+    "email": "trader1@gmail.com",
+    "name": "Ahmed Trader",
+    "passwordHash": "e45ee145229c5c095ed6c7ee2ddafce90d3df1de272daac0da6611f2fd005179ef841f4d92c64f6b4bfc054ac66964797923a7d18760d1914799c4a2aca9ed54",
+    "passwordSalt": "3ca003807bd0396db2788c8f92cbad2b",
+    "avatarUrl": "https://api.dicebear.com/7.x/initials/svg?seed=Ahmed%20Trader&backgroundColor=f59e0b&textColor=090a0f",
+    "provider": "email",
+    "createdAt": 1794229176715,
+    "lastLogin": 1794229182249,
+    "emailVerified": false,
+    "tier": "CRT_INSTITUTIONAL_PRO",
+    "preferredBroker": "IC_MARKETS_MT5"
+  }
+]
