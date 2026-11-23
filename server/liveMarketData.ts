@@ -1,7 +1,7 @@
 /**
  * Genuine Live Financial Market Data Engine for MUSCAB CRT PRO
  * Real-time institutional forex & CFD market feeds:
- * - AUD/USD: Real-time Forex Data Feed (OANDA Retail ECN calibration & Interbank ECN)
+ * - EUR/USD: Real-time Forex Data Feed (OANDA Retail ECN calibration & Interbank ECN)
  * - XAUUSD: Binance Spot Gold ECN (PAXGUSDT) & OANDA XAU/USD CFD
  * - NASDAQ: CME E-mini Futures (NQ=F) & Yahoo Finance (^IXIC)
  *
@@ -15,7 +15,7 @@
  */
 
 export interface LiveMarketQuote {
-  symbol: 'XAUUSD' | 'AUDUSD' | 'NASDAQ';
+  symbol: 'XAUUSD' | 'EURUSD' | 'NASDAQ';
   instrumentName: string;
   price: number;
   midPrice: number;
@@ -46,7 +46,7 @@ export interface LiveCandle {
 }
 
 export interface LiveMarketDataset {
-  symbol: 'XAUUSD' | 'AUDUSD' | 'NASDAQ';
+  symbol: 'XAUUSD' | 'EURUSD' | 'NASDAQ';
   timeframe: string;
   candles: LiveCandle[];
   correlatedCandles: LiveCandle[];
@@ -72,13 +72,13 @@ const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 /**
- * Fetch genuine live quote for AUD/USD
- * Priority: query2.finance.yahoo.com -> open.er-api.com -> query1.finance.yahoo.com
+ * Fetch genuine live quote for EUR/USD
+ * Priority: query2.finance.yahoo.com -> open.er-api.com -> DATA_DISCONNECTED
  * Supports OANDA retail broker calibration vs Interbank ECN
  */
-export async function fetchLiveAudQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): Promise<LiveMarketQuote> {
+export async function fetchLiveEurQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): Promise<LiveMarketQuote> {
   const now = Date.now();
-  const cacheKey = `AUDUSD_${broker}`;
+  const cacheKey = `EURUSD_${broker}`;
   const cached = quoteCache.get(cacheKey);
 
   if (cached && now - cached.timestamp < QUOTE_CACHE_TTL_MS) {
@@ -87,7 +87,7 @@ export async function fetchLiveAudQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): 
 
   // 1. Primary: query2.finance.yahoo.com with full browser headers
   try {
-    const res = await fetch('https://query2.finance.yahoo.com/v8/finance/chart/AUDUSD=X?interval=1d&range=2d', {
+    const res = await fetch('https://query2.finance.yahoo.com/v8/finance/chart/EURUSD=X?interval=1d&range=2d', {
       headers: {
         'User-Agent': USER_AGENT,
         Accept: 'application/json, text/plain, */*',
@@ -113,8 +113,8 @@ export async function fetchLiveAudQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): 
         const ask = Number((midPrice + halfSpread).toFixed(5));
 
         const quote: LiveMarketQuote = {
-          symbol: 'AUDUSD',
-          instrumentName: 'AUD/USD – Australian Dollar / US Dollar',
+          symbol: 'EURUSD',
+          instrumentName: 'EUR/USD – Euro / US Dollar',
           price: midPrice,
           midPrice,
           bid,
@@ -124,10 +124,10 @@ export async function fetchLiveAudQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): 
           low24h: low,
           change24h: change,
           provider: isOanda
-            ? 'OANDA Retail Forex ECN (AUD/USD · 0.9 Pip Spread Calibration)'
-            : 'Global Interbank Forex ECN (AUDUSD=X)',
-          apiSymbol: isOanda ? 'AUD_USD / OANDA CFD' : 'AUDUSD=X',
-          unit: 'USD per AUD',
+            ? 'OANDA Retail Forex ECN (EUR/USD · 0.9 Pip Spread Calibration)'
+            : 'Global Interbank Forex ECN (EURUSD=X)',
+          apiSymbol: isOanda ? 'EUR_USD / OANDA CFD' : 'EURUSD=X',
+          unit: 'USD per EUR',
           lastUpdated: now,
           lastUpdatedIso: new Date(now).toISOString(),
           status: 'LIVE',
@@ -142,12 +142,12 @@ export async function fetchLiveAudQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): 
       }
     }
   } catch (err) {
-    console.warn('[LiveFeed] query2 AUDUSD fetch failed, checking backup API:', err);
+    console.warn('[LiveFeed] query2 EURUSD fetch failed, checking backup API:', err);
   }
 
   // 2. High-Frequency Real-Time Fallback: open.er-api.com
   try {
-    const res = await fetch('https://open.er-api.com/v6/latest/AUD', {
+    const res = await fetch('https://open.er-api.com/v6/latest/EUR', {
       headers: { 'User-Agent': USER_AGENT },
     });
 
@@ -162,8 +162,8 @@ export async function fetchLiveAudQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): 
         const ask = Number((midPrice + halfSpread).toFixed(5));
 
         const quote: LiveMarketQuote = {
-          symbol: 'AUDUSD',
-          instrumentName: 'AUD/USD – Australian Dollar / US Dollar',
+          symbol: 'EURUSD',
+          instrumentName: 'EUR/USD – Euro / US Dollar',
           price: midPrice,
           midPrice,
           bid,
@@ -174,9 +174,9 @@ export async function fetchLiveAudQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): 
           change24h: 0.12,
           provider: isOanda
             ? 'OANDA Real-Time Rates (Exchange Engine Calibration)'
-            : 'Interbank Forex Live (AUD/USD)',
-          apiSymbol: isOanda ? 'AUD_USD / OANDA' : 'AUDUSD',
-          unit: 'USD per AUD',
+            : 'Interbank Forex Live (EUR/USD)',
+          apiSymbol: isOanda ? 'EUR_USD / OANDA' : 'EURUSD',
+          unit: 'USD per EUR',
           lastUpdated: now,
           lastUpdatedIso: new Date(now).toISOString(),
           status: 'LIVE',
@@ -191,13 +191,13 @@ export async function fetchLiveAudQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): 
       }
     }
   } catch (err) {
-    console.error('[LiveFeed] open.er-api AUDUSD fetch failed:', err);
+    console.error('[LiveFeed] open.er-api EURUSD fetch failed:', err);
   }
 
   // 3. If all live feeds fail: DATA DISCONNECTED
   return {
-    symbol: 'AUDUSD',
-    instrumentName: 'AUD/USD – Australian Dollar / US Dollar',
+    symbol: 'EURUSD',
+    instrumentName: 'EUR/USD – Euro / US Dollar',
     price: 0,
     midPrice: 0,
     bid: 0,
@@ -207,8 +207,8 @@ export async function fetchLiveAudQuote(broker: 'BINANCE' | 'OANDA' = 'OANDA'): 
     low24h: 0,
     change24h: 0,
     provider: 'Data Feed Disconnected',
-    apiSymbol: 'AUDUSD',
-    unit: 'USD per AUD',
+    apiSymbol: 'EURUSD',
+    unit: 'USD per EUR',
     lastUpdated: now,
     lastUpdatedIso: new Date(now).toISOString(),
     status: 'DATA_DISCONNECTED',
@@ -435,15 +435,15 @@ export async function fetchLiveNasdaqQuote(broker: 'BINANCE' | 'OANDA' = 'BINANC
  * Public method: Get all 3 live quotes simultaneously with broker specificity
  */
 export async function getAllLiveQuotes(broker: 'BINANCE' | 'OANDA' = 'OANDA'): Promise<Record<string, LiveMarketQuote>> {
-  const [xau, aud, nas] = await Promise.all([
+  const [xau, eur, nas] = await Promise.all([
     fetchLiveGoldQuote(broker),
-    fetchLiveAudQuote(broker),
+    fetchLiveEurQuote(broker),
     fetchLiveNasdaqQuote(broker),
   ]);
 
   return {
     XAUUSD: xau,
-    AUDUSD: aud,
+    EURUSD: eur,
     NASDAQ: nas,
   };
 }
@@ -616,11 +616,52 @@ async function fetchCorrelatedSilverCandles(timeframe: string): Promise<LiveCand
 }
 
 /**
+ * Correlated British Pound feed (GBPUSD=X) for SMT intermarket divergence on EUR/USD
+ */
+async function fetchCorrelatedGbpusdCandles(timeframe: string): Promise<LiveCandle[]> {
+  try {
+    const { interval, range } = toYahooIntervalRange(timeframe);
+    const res = await fetch(
+      `https://query2.finance.yahoo.com/v8/finance/chart/GBPUSD=X?interval=${interval}&range=${range}`,
+      { headers: { 'User-Agent': USER_AGENT } }
+    );
+
+    if (res.ok) {
+      const json = await res.json();
+      const result0 = json.chart?.result?.[0];
+      const timestamps = result0?.timestamp || [];
+      const q = result0?.indicators?.quote?.[0];
+
+      if (q && timestamps.length > 0) {
+        const rawCandles: LiveCandle[] = [];
+        for (let i = 0; i < timestamps.length; i++) {
+          const c = q.close?.[i];
+          if (c !== null && c !== undefined && !isNaN(c)) {
+            rawCandles.push({
+              time: timestamps[i],
+              open: Number((q.open?.[i] || c).toFixed(5)),
+              high: Number((q.high?.[i] || c).toFixed(5)),
+              low: Number((q.low?.[i] || c).toFixed(5)),
+              close: Number(c.toFixed(5)),
+              volume: q.volume?.[i] || 0,
+            });
+          }
+        }
+        return timeframe === '4H' ? aggregateCandlesTo4H(rawCandles) : rawCandles;
+      }
+    }
+  } catch (err) {
+    console.warn('[LiveFeed] Failed fetching GBPUSD correlated candles:', err);
+  }
+  return [];
+}
+
+/**
  * Fetch genuine live candlestick dataset for requested instrument and timeframe
  * Primary timeframes supported: 1M (Monthly), 1W (Weekly), 1D (Daily), 1H, 5M (plus 15M, 30M, 4H).
  */
 export async function fetchLiveCandles(
-  instrument: 'XAUUSD' | 'AUDUSD' | 'NASDAQ',
+  instrument: 'XAUUSD' | 'EURUSD' | 'NASDAQ',
   timeframe: string,
   broker: 'BINANCE' | 'OANDA' = 'BINANCE'
 ): Promise<LiveMarketDataset> {
@@ -692,11 +733,11 @@ export async function fetchLiveCandles(
     }
   }
 
-  // 2. FOR AUDUSD: Fetch real query2 Yahoo Finance candles (with query1 fallback)
-  if (instrument === 'AUDUSD') {
+  // 2. FOR EURUSD: Fetch real query2 Yahoo Finance candles (with query1 fallback) + correlated GBPUSD=X candles
+  if (instrument === 'EURUSD') {
     const urls = [
-      `https://query2.finance.yahoo.com/v8/finance/chart/AUDUSD=X?interval=${toYahooIntervalRange(timeframe).interval}&range=${toYahooIntervalRange(timeframe).range}`,
-      `https://query1.finance.yahoo.com/v8/finance/chart/AUDUSD=X?interval=${toYahooIntervalRange(timeframe).interval}&range=${toYahooIntervalRange(timeframe).range}`,
+      `https://query2.finance.yahoo.com/v8/finance/chart/EURUSD=X?interval=${toYahooIntervalRange(timeframe).interval}&range=${toYahooIntervalRange(timeframe).range}`,
+      `https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?interval=${toYahooIntervalRange(timeframe).interval}&range=${toYahooIntervalRange(timeframe).range}`,
     ];
 
     for (const url of urls) {
@@ -733,19 +774,22 @@ export async function fetchLiveCandles(
             const candles = timeframe === '4H' ? aggregateCandlesTo4H(rawCandles) : rawCandles;
 
             if (candles.length > 0) {
-              const audQuote = await fetchLiveAudQuote(broker);
-              const syncedCandles = synchronizeLatestCandleWithQuote(candles, audQuote, timeframe);
+              const [eurQuote, correlatedCandles] = await Promise.all([
+                fetchLiveEurQuote(broker),
+                fetchCorrelatedGbpusdCandles(timeframe),
+              ]);
+              const syncedCandles = synchronizeLatestCandleWithQuote(candles, eurQuote, timeframe);
               const isOanda = broker === 'OANDA';
               const dataset: LiveMarketDataset = {
-                symbol: 'AUDUSD',
+                symbol: 'EURUSD',
                 timeframe,
                 candles: syncedCandles,
-                correlatedCandles: [],
-                correlatedSymbol: 'NZDUSD=X',
+                correlatedCandles,
+                correlatedSymbol: 'GBPUSD=X (Cable)',
                 provider: isOanda
-                  ? 'OANDA Retail Forex ECN (AUD/USD · 0.9 Pip Spread)'
-                  : 'Yahoo Finance Forex ECN (AUDUSD=X)',
-                apiSymbol: isOanda ? 'AUD_USD / OANDA CFD' : 'AUDUSD=X',
+                  ? 'OANDA Retail Forex ECN (EUR/USD · 0.9 Pip Spread)'
+                  : 'Yahoo Finance Forex ECN (EURUSD=X)',
+                apiSymbol: isOanda ? 'EUR_USD / OANDA CFD' : 'EURUSD=X',
                 lastUpdated: now,
                 lastUpdatedIso: new Date(now).toISOString(),
                 status: 'LIVE',
@@ -761,7 +805,7 @@ export async function fetchLiveCandles(
           }
         }
       } catch (err) {
-        console.warn(`[LiveFeed] Failed fetching AUDUSD candles from ${url}:`, err);
+        console.warn(`[LiveFeed] Failed fetching EURUSD candles from ${url}:`, err);
       }
     }
   }

@@ -18,10 +18,20 @@ import {
   FiveMinAnalysis,
   Candle,
   LiquidityLevels,
+  TwoStageSignalStatus,
+  SignalStatusType,
 } from '../types/trading';
 import { SUPPORTED_INSTRUMENTS } from '../constants/instruments';
 import { fetchLiveMarketDataset } from './marketData';
 import { getSomaliaSessionState } from './sessionClock';
+import {
+  FIXED_SL_RR,
+  FIXED_TP_RR,
+  FIXED_RISK_REWARD,
+  FIXED_LOT_SIZE,
+  calculateFixedRiskLevels,
+  hasValidFixedSlTp,
+} from './fixedRiskManagement';
 
 export interface AnalysisProgressStep {
   step: 'MONTHLY' | 'WEEKLY' | '1H' | '5M' | 'COMPLETED';
@@ -463,17 +473,12 @@ function analyzeHourly(
   }
 
   // Required conditions check before moving to 5M:
-  // Must have:
-  // - Direction alignment with Monthly & Weekly
-  // - Either Purge OR 1H TS confirmed
-  // - 1H KL valid
-  // - 1H OB identified
-  const htfAlignment =
-    (monthly.direction === 'BULLISH' && direction === 'BULLISH') ||
-    (monthly.direction === 'BEARISH' && direction === 'BEARISH') ||
-    monthly.direction === 'CONSOLIDATION';
+  // Must have strict directional alignment (never confirm if Monthly & Weekly/1H conflict)
+  const noTimeframeConflict =
+    (monthly.direction === 'BULLISH' && direction === 'BULLISH' && (weekly.direction === 'BULLISH' || weekly.direction === 'NEUTRAL')) ||
+    (monthly.direction === 'BEARISH' && direction === 'BEARISH' && (weekly.direction === 'BEARISH' || weekly.direction === 'NEUTRAL'));
 
-  const all1HConditionsMet = htfAlignment && (purgeDetected || tsDetected) && klValid && obValid;
+  const all1HConditionsMet = noTimeframeConflict && (purgeDetected || tsDetected) && klValid && obValid;
 
   return {
     direction,
@@ -491,22 +496,24 @@ function analyzeHourly(
     all1HConditionsMet,
     notes: all1HConditionsMet
       ? 'All 1H CRT conditions confirmed. Qualified to proceed to 5M timeframe.'
+      : !noTimeframeConflict
+      ? 'Timeframe conflict or Monthly consolidation detected. Do not force direction.'
       : '1H conditions incomplete. Must not advance to 5M entry.',
   };
 }
 
 /**
- * Step 4: Analyze 5M Timeframe
- * - SMT Model 1
- * - SMT confirmation
- * - Entry confirmation
+ * Step 4: Analyze 5M Timeframe (Two-Stage Detection -> Closed Candle Confirmation)
+ * - Stage 1: Detects potential SMT Model 1 / TS setup while awaiting confirmation candle close
+ * - Stage 2: Requires the confirmation 5M candle to CLOSE with valid CRT displacement + live recheck
  */
 function analyzeFiveMin(
   candles: Candle[],
   corrCandles: Candle[],
   hourly: HourlyAnalysis,
   config: CrtStrategyConfig,
-  instrument: InstrumentId
+  instrument: InstrumentId,
+  livePrice: number
 ): FiveMinAnalysis {
   if (candles.length < 20 || !hourly.all1HConditionsMet) {
     return {
@@ -523,108 +530,171 @@ function analyzeFiveMin(
       notes: 'WAIT FOR SETUP. Higher timeframe criteria must be satisfied first.',
       tsDetected: false,
       tsDetails: 'Awaiting 5M setup',
+      isConfirmationCandleClosed: false,
+      setupDetectedPendingClose: false,
+      detectedDirection: 'NEUTRAL',
     };
   }
 
-  const current = candles[candles.length - 1];
-  const prev1 = candles[candles.length - 2];
-  const prev2 = candles[candles.length - 3];
-  const pip = SUPPORTED_INSTRUMENTS[instrument].pipSize;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const latestBar = candles[candles.length - 1];
+  const isLatestBarClosed = nowSec >= latestBar.time + 300;
 
+  // Stage 2 MUST evaluate a CLOSED 5M confirmation candle, never an unclosed forming candle
+  const closedIdx = isLatestBarClosed ? candles.length - 1 : candles.length - 2;
+  const closedCandle = candles[closedIdx];
+  const formingCandle = !isLatestBarClosed ? latestBar : undefined;
+  const prev1 = candles[closedIdx - 1];
+  const prev2 = candles[closedIdx - 2];
+
+  const pip = SUPPORTED_INSTRUMENTS[instrument].pipSize;
+  const decimals = SUPPORTED_INSTRUMENTS[instrument].decimals;
   const direction = hourly.direction;
 
-  // 1. 5M TS (Turtle Soup)
-  const recentHigh5M = Math.max(...candles.slice(-12, -1).map((c) => c.high));
-  const recentLow5M = Math.min(...candles.slice(-12, -1).map((c) => c.low));
-  const sweptHigh5M = current.high > recentHigh5M && current.close < recentHigh5M;
-  const sweptLow5M = current.low < recentLow5M && current.close > recentLow5M;
+  const confirmationCandleOpenTime = closedCandle.time;
+  const confirmationCandleCloseTime = (closedCandle.time + 300) * 1000;
+
+  // 1. 5M TS (Turtle Soup) evaluated across closed structure
+  const lookbackStart = Math.max(0, closedIdx - 11);
+  const priorSlice = candles.slice(lookbackStart, closedIdx);
+  const recentHigh5M = Math.max(...priorSlice.map((c) => c.high));
+  const recentLow5M = Math.min(...priorSlice.map((c) => c.low));
+
+  const sweptHighClosed = closedCandle.high > recentHigh5M && closedCandle.close < recentHigh5M;
+  const sweptLowClosed = closedCandle.low < recentLow5M && closedCandle.close > recentLow5M;
+  const sweptHighPrev = prev1.high > recentHigh5M && prev1.close < recentHigh5M;
+  const sweptLowPrev = prev1.low < recentLow5M && prev1.close > recentLow5M;
+  const sweptHighForming = formingCandle ? formingCandle.high > recentHigh5M : false;
+  const sweptLowForming = formingCandle ? formingCandle.low < recentLow5M : false;
 
   let tsDetected = false;
   let tsDetails = '5M TS: No sweep detected';
   if (direction === 'BULLISH') {
-    if (sweptLow5M || current.low < prev1.low) {
+    if (sweptLowClosed || sweptLowPrev || closedCandle.low < prev1.low) {
       tsDetected = true;
-      tsDetails = `5M Bullish TS: Swept 5M sell-side liquidity (${recentLow5M.toFixed(2)}) with immediate wick rejection`;
+      tsDetails = `5M Bullish TS: Swept 5M sell-side liquidity (${recentLow5M.toFixed(decimals)}) with rejection recovery`;
+    } else if (sweptLowForming) {
+      tsDetails = `Stage 1 5M Bullish TS forming below ${recentLow5M.toFixed(decimals)} — waiting for candle close`;
     }
   } else if (direction === 'BEARISH') {
-    if (sweptHigh5M || current.high > prev1.high) {
+    if (sweptHighClosed || sweptHighPrev || closedCandle.high > prev1.high) {
       tsDetected = true;
-      tsDetails = `5M Bearish TS: Swept 5M buy-side liquidity (${recentHigh5M.toFixed(2)}) with immediate wick rejection`;
+      tsDetails = `5M Bearish TS: Swept 5M buy-side liquidity (${recentHigh5M.toFixed(decimals)}) with rejection recovery`;
+    } else if (sweptHighForming) {
+      tsDetails = `Stage 1 5M Bearish TS forming above ${recentHigh5M.toFixed(decimals)} — waiting for candle close`;
     }
   }
 
-  // 2. 5M SMT Model 1
-  // Look for correlated swing divergence on the 5M chart
+  // 2. 5M SMT Model 1 (Authentic correlated swing divergence — no unconditional bypass)
   let smtModel1Valid = false;
   let smtModel1Details = 'Scanning for 5M SMT Model 1 signature';
-
   let smtConfirmation = false;
-  let smtConfirmationDetails = 'Awaiting correlated partner confirmation';
+  let smtConfirmationDetails = 'Awaiting correlated partner SMT confirmation';
 
-  if (corrCandles.length >= 4) {
-    const aLowRecent = Math.min(...candles.slice(-6, -1).map((c) => c.low));
-    const cLowRecent = Math.min(...corrCandles.slice(-6, -1).map((c) => c.low));
-    const aHighRecent = Math.max(...candles.slice(-6, -1).map((c) => c.high));
-    const cHighRecent = Math.max(...corrCandles.slice(-6, -1).map((c) => c.high));
+  if (corrCandles.length >= 6) {
+    const corrLookback = corrCandles.slice(-8, -1);
+    const aLowRecent = Math.min(...candles.slice(Math.max(0, closedIdx - 6), closedIdx).map((c) => c.low));
+    const cLowRecent = Math.min(...corrLookback.map((c) => c.low));
+    const aHighRecent = Math.max(...candles.slice(Math.max(0, closedIdx - 6), closedIdx).map((c) => c.high));
+    const cHighRecent = Math.max(...corrLookback.map((c) => c.high));
+
+    const corrClosed = corrCandles[Math.min(corrCandles.length - 1, corrCandles.length - (isLatestBarClosed ? 1 : 2))];
 
     if (direction === 'BULLISH') {
-      const assetNewLow = current.low <= aLowRecent;
-      const corrHeld = corrCandles[corrCandles.length - 1].low > cLowRecent;
+      const assetSweptLow = closedCandle.low <= aLowRecent || prev1.low <= aLowRecent;
+      const corrHeldHigherLow = corrClosed.low > cLowRecent || corrCandles[corrCandles.length - 1].low > cLowRecent;
+      const smtCrack = (assetSweptLow && corrHeldHigherLow) || (hourly.smtDetected && tsDetected);
 
-      if (assetNewLow || corrHeld || true) {
+      if (smtCrack) {
         smtModel1Valid = true;
-        smtModel1Details = `5M SMT Model 1 Formed: Liquidity sweep on ${instrument} with relative strength divergence on ${SUPPORTED_INSTRUMENTS[instrument].correlatedPair}`;
         smtConfirmation = true;
-        smtConfirmationDetails = `SMT Confirmation: Intermarket crack confirmed at institutional inflection level.`;
+        smtModel1Details = `5M SMT Model 1 Formed: Sell-side sweep on ${instrument} while ${SUPPORTED_INSTRUMENTS[instrument].correlatedPair} held structural low`;
+        smtConfirmationDetails = `SMT Confirmation: Bullish intermarket divergence verified at inflection level.`;
+      } else if (assetSweptLow || corrHeldHigherLow) {
+        smtModel1Valid = true;
+        smtConfirmation = false;
+        smtModel1Details = `Stage 1 5M SMT signature developing on ${instrument} vs ${SUPPORTED_INSTRUMENTS[instrument].correlatedPair} (awaiting confirmation)`;
       }
     } else if (direction === 'BEARISH') {
-      const assetNewHigh = current.high >= aHighRecent;
-      const corrHeld = corrCandles[corrCandles.length - 1].high < cHighRecent;
+      const assetSweptHigh = closedCandle.high >= aHighRecent || prev1.high >= aHighRecent;
+      const corrHeldLowerHigh = corrClosed.high < cHighRecent || corrCandles[corrCandles.length - 1].high < cHighRecent;
+      const smtCrack = (assetSweptHigh && corrHeldLowerHigh) || (hourly.smtDetected && tsDetected);
 
-      if (assetNewHigh || corrHeld || true) {
+      if (smtCrack) {
         smtModel1Valid = true;
-        smtModel1Details = `5M SMT Model 1 Formed: Buy-side sweep on ${instrument} with relative weakness divergence on ${SUPPORTED_INSTRUMENTS[instrument].correlatedPair}`;
         smtConfirmation = true;
-        smtConfirmationDetails = `SMT Confirmation: Intermarket crack confirmed at institutional high.`;
+        smtModel1Details = `5M SMT Model 1 Formed: Buy-side sweep on ${instrument} while ${SUPPORTED_INSTRUMENTS[instrument].correlatedPair} failed higher high`;
+        smtConfirmationDetails = `SMT Confirmation: Bearish intermarket divergence verified at institutional high.`;
+      } else if (assetSweptHigh || corrHeldLowerHigh) {
+        smtModel1Valid = true;
+        smtConfirmation = false;
+        smtModel1Details = `Stage 1 5M SMT signature developing on ${instrument} vs ${SUPPORTED_INSTRUMENTS[instrument].correlatedPair} (awaiting confirmation)`;
       }
     }
   } else {
-    smtModel1Valid = true;
-    smtConfirmation = true;
-    smtModel1Details = `5M SMT Model 1 Valid with ${SUPPORTED_INSTRUMENTS[instrument].correlatedPair}`;
-    smtConfirmationDetails = `SMT intermarket structure confirmed.`;
+    smtModel1Details = `Correlated partner (${SUPPORTED_INSTRUMENTS[instrument].correlatedPair}) 5M data unavailable for SMT verification`;
   }
 
-  // 3. Entry Confirmation
-  // Candle displacement break: strong close breaking recent swing high (for BUY) or swing low (for SELL)
+  // 3. Stage 2 Entry Confirmation (MUST be on CLOSED 5M displacement candle + live price recheck)
   let entryConfirmed = false;
-  let entryTriggerDetails = 'Awaiting 5M trigger candle close';
-  let triggerPrice = current.close;
-  let invalidationPrice = direction === 'BULLISH' ? current.low : current.high;
+  let setupDetectedPendingClose = false;
+  let entryTriggerDetails = 'Awaiting closed 5M confirmation candle';
+  let triggerPrice = closedCandle.close;
+  let invalidationPrice = 0;
 
   if (direction === 'BULLISH') {
-    const isGreen = current.close >= current.open;
-    const brokePrev = current.close >= prev1.high || current.close >= prev2.high || isGreen;
-    if (brokePrev) {
-      entryConfirmed = true;
-      triggerPrice = current.close;
-      const swingLow = Math.min(...candles.slice(-8).map((c) => c.low));
-      invalidationPrice = swingLow - config.slBufferPips * pip;
-      entryTriggerDetails = `5M Entry Confirmed: Bullish displacement candle closed at ${triggerPrice.toFixed(
-        2
-      )}. SL anchored at ${invalidationPrice.toFixed(2)}.`;
+    const rawSwingLow = Math.min(closedCandle.low, prev1.low, prev2.low) - config.slBufferPips * pip;
+    invalidationPrice = calculateFixedRiskLevels(closedCandle.close, 'BUY', instrument, rawSwingLow).stopLoss;
+
+    const closedBullishDisplacement =
+      closedCandle.close > closedCandle.open &&
+      (closedCandle.close > prev1.high || closedCandle.close > prev2.high);
+
+    const liveAboveInvalidation = livePrice > invalidationPrice;
+
+    if (closedBullishDisplacement && smtConfirmation && tsDetected) {
+      if (liveAboveInvalidation) {
+        entryConfirmed = true;
+        triggerPrice = closedCandle.close;
+        entryTriggerDetails = `Stage 2 Confirmed: Bullish 5M confirmation candle closed at ${triggerPrice.toFixed(
+          decimals
+        )}. 1RR SL anchored at ${invalidationPrice.toFixed(decimals)}.`;
+      } else {
+        entryTriggerDetails = `INVALID: Live price (${livePrice.toFixed(decimals)}) broke below 1RR SL (${invalidationPrice.toFixed(decimals)}) before entry.`;
+      }
+    } else if (formingCandle && formingCandle.close > formingCandle.open && (formingCandle.close > closedCandle.high || smtModel1Valid || tsDetected)) {
+      setupDetectedPendingClose = true;
+      entryTriggerDetails = `WAITING FOR MARKET CONFIRMATION: Bullish setup detected; waiting for current 5M candle to close at ${new Date((formingCandle.time + 300) * 1000).toISOString()}.`;
+    } else if (smtModel1Valid || tsDetected) {
+      setupDetectedPendingClose = true;
+      entryTriggerDetails = `WAITING FOR MARKET CONFIRMATION: 5M sweep/SMT detected; awaiting closed bullish displacement candle above ${prev1.high.toFixed(decimals)}.`;
     }
   } else if (direction === 'BEARISH') {
-    const isRed = current.close <= current.open;
-    const brokePrev = current.close <= prev1.low || current.close <= prev2.low || isRed;
-    if (brokePrev) {
-      entryConfirmed = true;
-      triggerPrice = current.close;
-      const swingHigh = Math.max(...candles.slice(-8).map((c) => c.high));
-      invalidationPrice = swingHigh + config.slBufferPips * pip;
-      entryTriggerDetails = `5M Entry Confirmed: Bearish displacement candle closed at ${triggerPrice.toFixed(
-        2
-      )}. SL anchored at ${invalidationPrice.toFixed(2)}.`;
+    const rawSwingHigh = Math.max(closedCandle.high, prev1.high, prev2.high) + config.slBufferPips * pip;
+    invalidationPrice = calculateFixedRiskLevels(closedCandle.close, 'SELL', instrument, rawSwingHigh).stopLoss;
+
+    const closedBearishDisplacement =
+      closedCandle.close < closedCandle.open &&
+      (closedCandle.close < prev1.low || closedCandle.close < prev2.low);
+
+    const liveBelowInvalidation = livePrice < invalidationPrice;
+
+    if (closedBearishDisplacement && smtConfirmation && tsDetected) {
+      if (liveBelowInvalidation) {
+        entryConfirmed = true;
+        triggerPrice = closedCandle.close;
+        entryTriggerDetails = `Stage 2 Confirmed: Bearish 5M confirmation candle closed at ${triggerPrice.toFixed(
+          decimals
+        )}. 1RR SL anchored at ${invalidationPrice.toFixed(decimals)}.`;
+      } else {
+        entryTriggerDetails = `INVALID: Live price (${livePrice.toFixed(decimals)}) broke above 1RR SL (${invalidationPrice.toFixed(decimals)}) before entry.`;
+      }
+    } else if (formingCandle && formingCandle.close < formingCandle.open && (formingCandle.close < closedCandle.low || smtModel1Valid || tsDetected)) {
+      setupDetectedPendingClose = true;
+      entryTriggerDetails = `WAITING FOR MARKET CONFIRMATION: Bearish setup detected; waiting for current 5M candle to close at ${new Date((formingCandle.time + 300) * 1000).toISOString()}.`;
+    } else if (smtModel1Valid || tsDetected) {
+      setupDetectedPendingClose = true;
+      entryTriggerDetails = `WAITING FOR MARKET CONFIRMATION: 5M sweep/SMT detected; awaiting closed bearish displacement candle below ${prev1.low.toFixed(decimals)}.`;
     }
   }
 
@@ -639,9 +709,18 @@ function analyzeFiveMin(
     invalidationPrice,
     tsDetected,
     tsDetails,
+    confirmationCandleOpenTime,
+    confirmationCandleCloseTime: setupDetectedPendingClose && formingCandle
+      ? (formingCandle.time + 300) * 1000
+      : confirmationCandleCloseTime,
+    isConfirmationCandleClosed: entryConfirmed ? true : isLatestBarClosed,
+    setupDetectedPendingClose,
+    detectedDirection: direction,
     notes: entryConfirmed
-      ? 'All 5M trading rules satisfied. Ready for execution.'
-      : 'Awaiting 5M displacement trigger.',
+      ? 'Stage 2 Market Confirmation complete on closed 5M candle.'
+      : setupDetectedPendingClose
+      ? 'WAITING FOR MARKET CONFIRMATION: Stage 1 setup detected; awaiting closed 5M trigger candle.'
+      : 'Awaiting 5M CRT displacement setup.',
   };
 }
 
@@ -774,19 +853,31 @@ export async function evaluateCrtSignal(
     fetchLiveMarketDataset(instrument, '5M', broker),
   ]);
 
-  // If live data is unavailable, disconnected, or empty, block signal generation and display DATA DISCONNECTED
+  // If live data is unavailable, disconnected, delayed (>120s), or empty, block signal confirmation
+  const isFeedDelayed =
+    typeof fiveData.lastUpdated === 'number' &&
+    fiveData.lastUpdated > 0 &&
+    Date.now() - fiveData.lastUpdated > 120_000;
+
   if (
     fiveData.feedStatus === 'DATA_UNAVAILABLE' ||
     fiveData.feedStatus === 'DATA_DISCONNECTED' ||
     fiveData.candles.length === 0 ||
-    fiveData.currentPrice <= 0
+    fiveData.currentPrice <= 0 ||
+    isFeedDelayed
   ) {
-    const isDisconnected = fiveData.feedStatus === 'DATA_DISCONNECTED';
+    const isDisconnected = fiveData.feedStatus === 'DATA_DISCONNECTED' || isFeedDelayed;
     return {
       instrument,
       instrumentName: info.name,
       verdict: 'WAIT',
-      status: 'WAIT_FOR_SETUP',
+      status: 'INVALID_SETUP',
+      twoStageStatus: 'INVALID',
+      stageLabel: isFeedDelayed ? 'DATA DELAYED — SIGNAL BLOCKED' : 'DATA DISCONNECTED',
+      pendingDirection: 'NONE',
+      confirmationReason: isFeedDelayed
+        ? 'Live market feed is delayed (>120s). Confirmation blocked.'
+        : 'Live financial market feed disconnected.',
       timestamp: Date.now(),
       entryPrice: 0,
       stopLoss: 0,
@@ -877,11 +968,11 @@ export async function evaluateCrtSignal(
       satisfiedRules: [],
       pendingRules: [
         isDisconnected
-          ? 'DATA DISCONNECTED: Live market WebSocket/feed is offline'
+          ? 'DATA DISCONNECTED: Live market WebSocket/feed is offline or delayed'
           : 'DATA UNAVAILABLE: Live financial API connection is required to evaluate CRT rules',
       ],
       summaryMessage: isDisconnected
-        ? 'DATA DISCONNECTED: Live streaming connection is offline. No fake, estimated, or delayed prices are generated.'
+        ? 'DATA DISCONNECTED: Live streaming connection is offline or delayed. Signals are blocked until real-time data resumes.'
         : 'DATA UNAVAILABLE: Live financial market API did not return data. Signals cannot be generated without genuine live prices.',
       dataProvider: fiveData.dataProvider || 'Live Financial API Error',
       apiSymbol: fiveData.apiSymbol || instrument,
@@ -908,8 +999,15 @@ export async function evaluateCrtSignal(
   // 3.5 15-MINUTE ANALYSIS
   const fifteenMin = analyzeFifteenMin(fifteenMData.candles, fifteenMData.correlatedCandles, hourly, config, instrument);
 
-  // 4. 5M ANALYSIS
-  const fiveMin = analyzeFiveMin(fiveData.candles, fiveData.correlatedCandles, hourly, config, instrument);
+  // 4. 5M ANALYSIS (Two-Stage Detection & Closed Confirmation Candle)
+  const fiveMin = analyzeFiveMin(
+    fiveData.candles,
+    fiveData.correlatedCandles,
+    hourly,
+    config,
+    instrument,
+    fiveData.currentPrice
+  );
 
   const satisfiedRules: string[] = [];
   const pendingRules: string[] = [];
@@ -928,13 +1026,13 @@ export async function evaluateCrtSignal(
   }
 
   if (weekly.keyLevelIdentified) {
-    satisfiedRules.push(`Weekly Key Level identified at ${weekly.keyLevelPrice.toFixed(2)}`);
+    satisfiedRules.push(`Weekly Key Level identified at ${weekly.keyLevelPrice.toFixed(info.decimals)}`);
   }
 
   if (weekly.priceReturnedToKL) {
     satisfiedRules.push('Price returned and reacted at Weekly Key Level');
   } else {
-    pendingRules.push(`Price has not yet returned to Weekly Key Level (${weekly.keyLevelPrice.toFixed(2)})`);
+    pendingRules.push(`Price has not yet returned to Weekly Key Level (${weekly.keyLevelPrice.toFixed(info.decimals)})`);
   }
 
   if (config.requireWeeklyOBReturn) {
@@ -966,109 +1064,145 @@ export async function evaluateCrtSignal(
   }
 
   if (fiveMin.entryConfirmed) {
-    satisfiedRules.push('5M Entry Trigger displacement candle closed');
+    satisfiedRules.push('Stage 2 Confirmed: 5M displacement candle closed cleanly');
+  } else if (fiveMin.entryTriggerDetails.startsWith('INVALID')) {
+    pendingRules.push(fiveMin.entryTriggerDetails);
   } else {
-    pendingRules.push('Awaiting 5M trigger candle confirmation');
+    pendingRules.push('WAITING FOR MARKET CONFIRMATION: Awaiting closed 5M trigger candle');
   }
 
-  // Final Signal Decision
-  // Final BUY or SELL signal must only appear when ALL required conditions are satisfied.
-  // If conditions are incomplete, display WAIT.
-  // Distinguish between DETECTED_SETUP and CONFIRMED_SIGNAL.
+  // TWO-STAGE SIGNAL DECISION
+  // STAGE 1 (DETECTED / WAITING): Never publish BUY or SELL before Stage 2 confirmation candle closes.
+  // STAGE 2 (CONFIRMED): Publish BUY or SELL only after closed 5M candle + live price recheck.
   let verdict: 'BUY' | 'SELL' | 'WAIT' = 'WAIT';
-  let status: 'CONFIRMED_SIGNAL' | 'DETECTED_SETUP' | 'WAIT_FOR_SETUP' = 'WAIT_FOR_SETUP';
+  let status: SignalStatusType = 'WAIT_FOR_SETUP';
+  let twoStageStatus: TwoStageSignalStatus = 'WAITING';
+  let stageLabel = 'SCANNING CRT CONFLUENCE';
+  let pendingDirection: 'BUY' | 'SELL' | 'NONE' = 'NONE';
 
   const pip = info.pipSize;
   const currentPrice = fiveData.currentPrice;
 
-  // Check if fully confirmed
+  const hasTimeframeConflict =
+    (monthly.direction === 'BULLISH' && (weekly.direction === 'BEARISH' || hourly.direction === 'BEARISH')) ||
+    (monthly.direction === 'BEARISH' && (weekly.direction === 'BULLISH' || hourly.direction === 'BULLISH'));
+
   const isWeeklySatisfied = weekly.priceReturnedToKL && (!config.requireWeeklyOBReturn || weekly.priceReturnedToOB);
-  const isFullyConfirmed =
+  const setupInvalidatedBeforeConfirmation = fiveMin.entryTriggerDetails.startsWith('INVALID');
+
+  const isStage2Confirmed =
+    !hasTimeframeConflict &&
     monthly.direction !== 'CONSOLIDATION' &&
     isWeeklySatisfied &&
     hourly.all1HConditionsMet &&
+    fiveMin.tsDetected &&
     fiveMin.smtModel1Valid &&
     fiveMin.smtConfirmation &&
     fiveMin.entryConfirmed;
 
-  // Check if detected setup (waiting for entry candle)
-  const isSetupDetected =
+  const isStage1Detected =
+    !hasTimeframeConflict &&
     monthly.direction !== 'CONSOLIDATION' &&
     isWeeklySatisfied &&
     hourly.all1HConditionsMet &&
-    fiveMin.smtModel1Valid;
+    (fiveMin.smtModel1Valid || fiveMin.tsDetected || fiveMin.setupDetectedPendingClose);
 
-  if (isFullyConfirmed) {
+  if (isStage2Confirmed) {
     verdict = hourly.direction === 'BULLISH' ? 'BUY' : 'SELL';
     status = 'CONFIRMED_SIGNAL';
-  } else if (isSetupDetected) {
+    twoStageStatus = 'CONFIRMED';
+    stageLabel = 'MARKET CONFIRMED';
+    pendingDirection = verdict;
+  } else if (setupInvalidatedBeforeConfirmation || hasTimeframeConflict) {
+    verdict = 'WAIT';
+    status = 'INVALID_SETUP';
+    twoStageStatus = 'INVALID';
+    stageLabel = hasTimeframeConflict
+      ? 'INVALID — CONFLICTING TIMEFRAMES'
+      : 'INVALID — SETUP REJECTED BEFORE CONFIRMATION';
+    pendingDirection = 'NONE';
+  } else if (isStage1Detected) {
     verdict = 'WAIT';
     status = 'DETECTED_SETUP';
+    twoStageStatus = fiveMin.smtModel1Valid ? 'WAITING' : 'DETECTED';
+    stageLabel = 'WAITING FOR MARKET CONFIRMATION';
+    pendingDirection = hourly.direction === 'BULLISH' ? 'BUY' : hourly.direction === 'BEARISH' ? 'SELL' : 'NONE';
   } else {
     verdict = 'WAIT';
     status = 'WAIT_FOR_SETUP';
+    twoStageStatus = 'WAITING';
+    stageLabel = 'WAITING FOR CRT SETUP';
+    pendingDirection = 'NONE';
   }
 
-  // Calculate Entry, SL, TP1, TP2, TP3
-  let entryPrice = currentPrice;
+  // Calculate Entry, 1RR Stop Loss, and 3RR Take Profit (BUY and SELL) at Lot Size 1
+  let entryPrice = Number(currentPrice.toFixed(info.decimals));
   let stopLoss = 0;
   let tp1 = 0;
   let tp2 = 0;
   let tp3 = 0;
+  let pipsRisk = 0;
+  let pipsReward1 = 0;
 
-  if (verdict === 'BUY') {
-    entryPrice = currentPrice;
-    // SL below the 5M invalidation wick
-    stopLoss = fiveMin.invalidationPrice > 0 ? fiveMin.invalidationPrice : currentPrice - (isGold(instrument) ? 12 : 0.002);
-    if (stopLoss >= entryPrice) {
-      stopLoss = entryPrice - (isGold(instrument) ? 10 : 0.002);
+  if (verdict === 'BUY' || verdict === 'SELL') {
+    const fixed = calculateFixedRiskLevels(currentPrice, verdict, instrument, fiveMin.invalidationPrice);
+    if (!fixed.valid || !hasValidFixedSlTp(fixed.entryPrice, fixed.stopLoss, fixed.takeProfit, verdict)) {
+      // Rule: Never open/confirm a trade without valid 1RR SL and 3RR TP
+      verdict = 'WAIT';
+      status = 'INVALID_SETUP';
+      twoStageStatus = 'INVALID';
+      stageLabel = 'INVALID — 1RR SL / 3RR TP REQUIRED BEFORE ENTRY';
+      pendingDirection = 'NONE';
+    } else {
+      entryPrice = fixed.entryPrice;
+      stopLoss = fixed.stopLoss;
+      tp1 = fixed.takeProfit;
+      tp2 = fixed.takeProfit;
+      tp3 = fixed.takeProfit;
+      pipsRisk = fixed.pipsRisk;
+      pipsReward1 = fixed.pipsReward;
     }
-    const risk = entryPrice - stopLoss;
-    tp1 = Number((entryPrice + risk * config.tp1Ratio).toFixed(info.decimals));
-    tp2 = Number((entryPrice + risk * config.tp2Ratio).toFixed(info.decimals));
-    tp3 = Number(
-      (monthly.monthlyTarget > entryPrice ? monthly.monthlyTarget : entryPrice + risk * config.tp3Ratio).toFixed(
-        info.decimals
-      )
-    );
-  } else if (verdict === 'SELL') {
-    entryPrice = currentPrice;
-    stopLoss = fiveMin.invalidationPrice > 0 ? fiveMin.invalidationPrice : currentPrice + (isGold(instrument) ? 12 : 0.002);
-    if (stopLoss <= entryPrice) {
-      stopLoss = entryPrice + (isGold(instrument) ? 10 : 0.002);
-    }
-    const risk = stopLoss - entryPrice;
-    tp1 = Number((entryPrice - risk * config.tp1Ratio).toFixed(info.decimals));
-    tp2 = Number((entryPrice - risk * config.tp2Ratio).toFixed(info.decimals));
-    tp3 = Number(
-      (monthly.monthlyTarget < entryPrice && monthly.monthlyTarget > 0
-        ? monthly.monthlyTarget
-        : entryPrice - risk * config.tp3Ratio
-      ).toFixed(info.decimals)
-    );
-  } else {
-    // In WAIT state, show potential setup anchors if detected, or clear targets
-    entryPrice = currentPrice;
-    const placeholderRisk = isGold(instrument) ? 10 : isNas(instrument) ? 60 : 0.0018;
-    stopLoss = hourly.direction === 'BULLISH' ? currentPrice - placeholderRisk : currentPrice + placeholderRisk;
-    tp1 = hourly.direction === 'BULLISH' ? currentPrice + placeholderRisk * 2 : currentPrice - placeholderRisk * 2;
-    tp2 = hourly.direction === 'BULLISH' ? currentPrice + placeholderRisk * 3.5 : currentPrice - placeholderRisk * 3.5;
-    tp3 = monthly.monthlyTarget > 0 ? monthly.monthlyTarget : (hourly.direction === 'BULLISH' ? currentPrice + placeholderRisk * 5 : currentPrice - placeholderRisk * 5);
   }
 
-  const pipsRisk = Math.abs(entryPrice - stopLoss) / pip;
-  const pipsReward1 = Math.abs(tp1 - entryPrice) / pip;
-  const riskReward1 = pipsRisk > 0 ? Number((pipsReward1 / pipsRisk).toFixed(2)) : 2.0;
-  const riskReward2 = pipsRisk > 0 ? Number(((Math.abs(tp2 - entryPrice) / pip) / pipsRisk).toFixed(2)) : 3.5;
-  const riskReward3 = pipsRisk > 0 ? Number(((Math.abs(tp3 - entryPrice) / pip) / pipsRisk).toFixed(2)) : 5.0;
+  if (verdict === 'WAIT') {
+    const previewDir: 'BUY' | 'SELL' | null =
+      pendingDirection === 'BUY' || pendingDirection === 'SELL'
+        ? pendingDirection
+        : hourly.direction === 'BULLISH'
+        ? 'BUY'
+        : hourly.direction === 'BEARISH'
+        ? 'SELL'
+        : null;
+    if (previewDir && currentPrice > 0) {
+      const preview = calculateFixedRiskLevels(currentPrice, previewDir, instrument, fiveMin.invalidationPrice);
+      entryPrice = preview.entryPrice;
+      stopLoss = preview.stopLoss;
+      tp1 = preview.takeProfit;
+      tp2 = preview.takeProfit;
+      tp3 = preview.takeProfit;
+      pipsRisk = preview.pipsRisk;
+      pipsReward1 = preview.pipsReward;
+    }
+  }
+
+  const riskReward1 = FIXED_RISK_REWARD;
+  const riskReward2 = FIXED_RISK_REWARD;
+  const riskReward3 = FIXED_RISK_REWARD;
 
   let summaryMessage = '';
+  const candleCloseTime = fiveMin.confirmationCandleCloseTime || Date.now();
+  const candleCloseIso = new Date(candleCloseTime).toISOString();
+
   if (status === 'CONFIRMED_SIGNAL') {
-    summaryMessage = `VALID ${verdict} SETUP CONFIRMED: Monthly ${monthly.direction} bias aligned with Weekly KL mitigation, 1H Purge, and 5M SMT Model 1 trigger.`;
+    summaryMessage = `STAGE 2 CONFIRMED (${verdict}): Closed 5M confirmation candle validated Monthly ${monthly.direction} bias, Weekly KL mitigation, 1H Purge/TS, and 5M SMT Model 1. Risk Applied: ${FIXED_SL_RR}RR SL (${stopLoss.toFixed(info.decimals)}) / ${FIXED_TP_RR}RR TP (${tp1.toFixed(info.decimals)}) · Lot Size ${FIXED_LOT_SIZE}.00.`;
+  } else if (status === 'INVALID_SETUP') {
+    summaryMessage = hasTimeframeConflict
+      ? `INVALID SETUP (WAIT): Conflicting directions detected between Monthly (${monthly.direction}), Weekly (${weekly.direction}), and 1H (${hourly.direction}). Trade rejected.`
+      : `INVALID SETUP (WAIT): ${fiveMin.entryTriggerDetails}`;
   } else if (status === 'DETECTED_SETUP') {
-    summaryMessage = `SETUP DETECTED (WAIT): Higher timeframe criteria are satisfied. Awaiting final 5M trigger candle close.`;
+    summaryMessage = `STAGE 1 DETECTED — WAITING FOR MARKET CONFIRMATION: Potential ${pendingDirection} CRT setup aligned through 1H. Holding WAIT until 5M confirmation candle closes cleanly.`;
   } else {
-    summaryMessage = `WAIT FOR SETUP: Market currently in formation. ${pendingRules[0] || 'Required criteria incomplete'}.`;
+    summaryMessage = `WAIT FOR SETUP: Market currently in formation. ${pendingRules[0] || 'Required CRT criteria incomplete'}.`;
   }
 
   // Extract authentic Previous Day High/Low, Previous Week High/Low, Previous Month High/Low
@@ -1146,12 +1280,22 @@ export async function evaluateCrtSignal(
     instrumentName: info.name,
     verdict,
     status,
+    twoStageStatus,
+    stageLabel,
+    pendingDirection,
+    confirmationCandleCloseTime: candleCloseTime,
+    confirmationCandleCloseIso: candleCloseIso,
+    confirmationReason: summaryMessage,
     timestamp: Date.now(),
     entryPrice: Number(entryPrice.toFixed(info.decimals)),
     stopLoss: Number(stopLoss.toFixed(info.decimals)),
+    takeProfit: Number(tp1.toFixed(info.decimals)),
     takeProfit1: Number(tp1.toFixed(info.decimals)),
     takeProfit2: Number(tp2.toFixed(info.decimals)),
     takeProfit3: Number(tp3.toFixed(info.decimals)),
+    slRR: FIXED_SL_RR,
+    tpRR: FIXED_TP_RR,
+    lotSize: FIXED_LOT_SIZE,
     riskReward1,
     riskReward2,
     riskReward3,

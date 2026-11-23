@@ -1,7 +1,7 @@
 /**
  * MUSCAB CRT PRO - OFFICIAL TRADINGVIEW ADVANCED CHART WIDGET
  * Directly connects with TradingView's official real-time charting platform:
- * 1. Live streaming connection to TradingView servers (OANDA:AUDUSD, OANDA:XAUUSD, NASDAQ:NDX)
+ * 1. Live streaming connection to TradingView servers (OANDA:EURUSD, OANDA:XAUUSD, NASDAQ:NDX)
  * 2. Full official TradingView indicators (RSI, MACD, Moving Averages, Volume, Supertrend, etc.)
  * 3. Full native TradingView drawing tools (Fibonacci retracements, Trend lines, Pitchforks, Gann, Text)
  * 4. Exact broker feeds: OANDA Forex vs Binance Spot ECN
@@ -46,7 +46,7 @@ export const OfficialTradingViewWidget: React.FC<OfficialTradingViewWidgetProps>
   const [isScriptLoaded, setIsScriptLoaded] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<boolean>(false);
   const [selectedFeed, setSelectedFeed] = useState<string>(() => {
-    if (instrument === 'AUDUSD') return broker === 'OANDA' ? 'OANDA:AUDUSD' : 'FX:AUDUSD';
+    if (instrument === 'EURUSD') return broker === 'OANDA' ? 'OANDA:EURUSD' : 'FX:EURUSD';
     if (instrument === 'XAUUSD') return broker === 'OANDA' ? 'OANDA:XAUUSD' : 'BINANCE:XAUUSDT';
     return 'NASDAQ:NDX';
   });
@@ -77,8 +77,8 @@ export const OfficialTradingViewWidget: React.FC<OfficialTradingViewWidgetProps>
 
   // Determine standard default symbol for instrument & broker
   useEffect(() => {
-    if (instrument === 'AUDUSD') {
-      setSelectedFeed(broker === 'OANDA' ? 'OANDA:AUDUSD' : 'FX:AUDUSD');
+    if (instrument === 'EURUSD') {
+      setSelectedFeed(broker === 'OANDA' ? 'OANDA:EURUSD' : 'FX:EURUSD');
     } else if (instrument === 'XAUUSD') {
       setSelectedFeed(broker === 'OANDA' ? 'OANDA:XAUUSD' : 'BINANCE:XAUUSDT');
     } else {
@@ -167,11 +167,11 @@ export const OfficialTradingViewWidget: React.FC<OfficialTradingViewWidgetProps>
 
   // Available feeds for active instrument
   const feedOptions: Record<InstrumentId, { symbol: string; label: string }[]> = {
-    AUDUSD: [
-      { symbol: 'OANDA:AUDUSD', label: 'OANDA MT5 Feed (Direct)' },
-      { symbol: 'FX:AUDUSD', label: 'FX Interbank ECN' },
-      { symbol: 'FOREXCOM:AUDUSD', label: 'FOREX.com Retail' },
-      { symbol: 'BINANCE:AUDUSDT', label: 'Binance USDT' },
+    EURUSD: [
+      { symbol: 'OANDA:EURUSD', label: 'OANDA MT5 Feed (Direct)' },
+      { symbol: 'FX:EURUSD', label: 'FX Interbank ECN' },
+      { symbol: 'FOREXCOM:EURUSD', label: 'FOREX.com Retail' },
+      { symbol: 'BINANCE:EURUSDT', label: 'Binance USDT' },
     ],
     XAUUSD: [
       { symbol: 'OANDA:XAUUSD', label: 'OANDA Gold CFD' },

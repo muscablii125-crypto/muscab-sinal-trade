@@ -13,12 +13,21 @@ import { InstrumentId, LiveQuoteTick, CrtSignalResult, PositionDrawing } from '.
 import { SUPPORTED_INSTRUMENTS } from '../constants/instruments';
 import { soundEffects } from '../services/soundEffects';
 import {
+  FIXED_SL_RR,
+  FIXED_TP_RR,
+  FIXED_RISK_REWARD,
+  FIXED_LOT_SIZE,
+  calculateFixedRiskLevels,
+  hasValidFixedSlTp,
+} from '../services/fixedRiskManagement';
+import {
   TrendingUp,
   TrendingDown,
   X,
   Activity,
   Wifi,
   ShieldCheck,
+  Lock,
   Building2,
   DollarSign,
   Percent,
@@ -66,12 +75,9 @@ export const MarketOrderTicketModal: React.FC<MarketOrderTicketModalProps> = ({
   const [direction, setDirection] = useState<'BUY' | 'SELL'>(initialDirection);
   const [executionType, setExecutionType] = useState<'MARKET' | 'SIGNAL_TRIGGER'>('MARKET');
   const [accountBalance, setAccountBalance] = useState<number>(10000);
-  const [riskPercent, setRiskPercent] = useState<number>(1.0); // 1% risk default
-  const [customLotSize, setCustomLotSize] = useState<string>('');
 
   const instrumentInfo = SUPPORTED_INSTRUMENTS[selectedInstrument];
   const decimals = instrumentInfo.decimals;
-  const pipSize = instrumentInfo.pipSize;
 
   // Live Bid and Ask
   const liveBid = quoteTick?.bid || instrumentInfo.currentPrice;
@@ -96,61 +102,47 @@ export const MarketOrderTicketModal: React.FC<MarketOrderTicketModalProps> = ({
     marketEntryPrice = signal.entryPrice;
   }
 
-  // Calculate default Stop Loss & Take Profits
-  let calculatedSL = 0;
-  let calculatedTP1 = 0;
-  let calculatedTP2 = 0;
-  let calculatedTP3 = 0;
-
-  // Use signal levels if valid and direction matches, otherwise calculate standard 1:2 / 1:3 levels
-  const defaultPipRisk = selectedInstrument === 'AUDUSD' ? 14.0 : selectedInstrument === 'XAUUSD' ? 65.0 : 45.0;
-
-  if (signal && signal.stopLoss > 0 && signal.verdict === direction) {
-    calculatedSL = signal.stopLoss;
-    calculatedTP1 = signal.takeProfit1;
-    calculatedTP2 = signal.takeProfit2;
-    calculatedTP3 = signal.takeProfit3;
-  } else {
-    // Generate default levels matching CRT strategy logic
-    if (isBuy) {
-      calculatedSL = Number((marketEntryPrice - defaultPipRisk * pipSize).toFixed(decimals));
-      calculatedTP1 = Number((marketEntryPrice + defaultPipRisk * 2 * pipSize).toFixed(decimals));
-      calculatedTP2 = Number((marketEntryPrice + defaultPipRisk * 3 * pipSize).toFixed(decimals));
-      calculatedTP3 = Number((marketEntryPrice + defaultPipRisk * 5 * pipSize).toFixed(decimals));
-    } else {
-      calculatedSL = Number((marketEntryPrice + defaultPipRisk * pipSize).toFixed(decimals));
-      calculatedTP1 = Number((marketEntryPrice - defaultPipRisk * 2 * pipSize).toFixed(decimals));
-      calculatedTP2 = Number((marketEntryPrice - defaultPipRisk * 3 * pipSize).toFixed(decimals));
-      calculatedTP3 = Number((marketEntryPrice - defaultPipRisk * 5 * pipSize).toFixed(decimals));
-    }
-  }
+  // Strictly calculate 1RR Stop Loss and 3RR Take Profit (1:3 R:R) from actual entry price
+  const structuralSlHint =
+    signal && signal.verdict === direction && signal.stopLoss > 0 ? signal.stopLoss : undefined;
+  const fixedRisk = calculateFixedRiskLevels(
+    marketEntryPrice,
+    direction,
+    selectedInstrument,
+    structuralSlHint
+  );
+  const calculatedSL = fixedRisk.stopLoss;
+  const calculatedTP1 = fixedRisk.takeProfit;
+  const calculatedTP2 = fixedRisk.takeProfit;
+  const calculatedTP3 = fixedRisk.takeProfit;
+  const hasRequiredSlTp =
+    fixedRisk.valid &&
+    hasValidFixedSlTp(fixedRisk.entryPrice, calculatedSL, calculatedTP1, direction);
 
   // Distance in pips
-  const pipsRisk = Math.max(1, Number((Math.abs(marketEntryPrice - calculatedSL) / pipSize).toFixed(1)));
-  const pipsReward1 = Number((Math.abs(calculatedTP1 - marketEntryPrice) / pipSize).toFixed(1));
+  const pipsRisk = Math.max(0.1, fixedRisk.pipsRisk);
+  const pipsReward1 = fixedRisk.pipsReward;
 
-  // Risk in Dollars ($)
-  const riskAmountUsd = (accountBalance * riskPercent) / 100;
-
-  // Auto Lot Size: Risk Amount / (Pips Risk * Pip Value per lot)
-  // Standard Lot Pip Value: AUDUSD = $10 / pip, XAUUSD = $10 / pip (100oz standard lot), NASDAQ = $1 / pip
+  // Fixed Lot Size = 1.00 Standard Lot
+  // Standard Lot Pip Value: EURUSD = $10 / pip, XAUUSD = $10 / pip (100oz standard lot), NASDAQ = $1 / pip
   const pipValuePerStandardLot = selectedInstrument === 'NASDAQ' ? 1 : 10;
-  const rawLotSize = riskAmountUsd / (pipsRisk * pipValuePerStandardLot);
-  const calculatedLot = Math.max(0.01, Number(rawLotSize.toFixed(2)));
-  const effectiveLotSize = customLotSize ? parseFloat(customLotSize) || calculatedLot : calculatedLot;
+  const effectiveLotSize = FIXED_LOT_SIZE;
 
-  // Dollar reward at TP1
-  const potentialProfitUsd = Number((pipsReward1 * pipValuePerStandardLot * effectiveLotSize).toFixed(2));
+  // Dollar risk at 1RR SL and reward at 3RR TP (Fixed 1.00 Lot)
   const actualRiskUsd = Number((pipsRisk * pipValuePerStandardLot * effectiveLotSize).toFixed(2));
+  const potentialProfitUsd = Number((pipsReward1 * pipValuePerStandardLot * effectiveLotSize).toFixed(2));
+  const riskPercent =
+    accountBalance > 0 ? Number(((actualRiskUsd / accountBalance) * 100).toFixed(2)) : 0;
 
-  // Handle Order Execution
+  // Handle Order Execution — STRICT GUARD: Never open a trade without valid SL & TP
   const handleExecute = () => {
+    if (!hasRequiredSlTp) return;
     soundEffects.playSignalChime(direction);
 
     // Call onOrderExecuted
     onOrderExecuted({
       direction,
-      entryPrice: marketEntryPrice,
+      entryPrice: fixedRisk.entryPrice,
       stopLoss: calculatedSL,
       takeProfit1: calculatedTP1,
       takeProfit2: calculatedTP2,
@@ -340,14 +332,17 @@ export const MarketOrderTicketModal: React.FC<MarketOrderTicketModalProps> = ({
             </div>
           </div>
 
-          {/* RISK & POSITION SIZING CALCULATOR */}
+          {/* FIXED LOT SIZE & RISK PROFILE */}
           <div className="p-4 rounded-2xl bg-neutral-950/80 border border-neutral-800 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-[11px] uppercase tracking-wider text-slate-400 font-bold flex items-center gap-1.5">
                 <Sliders className="w-3.5 h-3.5 text-amber-400" />
-                <span>Account Risk & Lot Sizing</span>
+                <span>Position Sizing &amp; Risk Exposure</span>
               </span>
-              <span className="text-slate-400 text-[10px]">Auto Calculated</span>
+              <span className="inline-flex items-center gap-1 text-amber-300 text-[10px] font-bold">
+                <Lock className="w-3 h-3" />
+                <span>LOT SIZE {FIXED_LOT_SIZE}.00 LOCKED</span>
+              </span>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -365,84 +360,91 @@ export const MarketOrderTicketModal: React.FC<MarketOrderTicketModalProps> = ({
                 </div>
               </div>
 
-              {/* Risk Percentage */}
+              {/* Fixed Lot Size 1.00 */}
               <div>
-                <label className="text-[10px] uppercase text-slate-500 block mb-1">Risk per Trade</label>
-                <div className="flex items-center gap-1">
-                  {[1.0, 2.0, 3.0].map((r) => (
-                    <button
-                      key={r}
-                      onClick={() => setRiskPercent(r)}
-                      className={`flex-1 py-2 rounded-xl font-bold transition-all ${
-                        riskPercent === r
-                          ? 'bg-amber-500 text-slate-950 shadow-sm'
-                          : 'bg-neutral-900 border border-neutral-800 text-slate-300 hover:text-white'
-                      }`}
-                    >
-                      {r}%
-                    </button>
-                  ))}
+                <label className="text-[10px] uppercase text-slate-500 block mb-1">Fixed Lot Size</label>
+                <div className="w-full bg-amber-500/15 border border-amber-500/40 rounded-xl px-3 py-2 text-amber-300 font-black flex items-center justify-between">
+                  <span>{effectiveLotSize.toFixed(2)} Lot</span>
+                  <span className="text-[9px] uppercase text-amber-200/80">Fixed</span>
                 </div>
               </div>
             </div>
 
-            {/* Calculated Lots & Dollar Risk */}
+            {/* 1RR Risk & 3RR Target Exposure */}
             <div className="grid grid-cols-2 gap-3 pt-2 border-t border-neutral-800 text-[11px]">
               <div className="p-2.5 rounded-xl bg-black/40 border border-neutral-800">
-                <span className="text-slate-400 block text-[10px]">Calculated Position Size</span>
-                <div className="text-base font-extrabold text-amber-400">{effectiveLotSize} Lots</div>
-                <span className="text-[10px] text-slate-500">1 Standard Lot = $10/pip</span>
+                <span className="text-slate-400 block text-[10px]">Risk at {FIXED_SL_RR}RR Stop Loss</span>
+                <div className="text-base font-extrabold text-rose-400">-${actualRiskUsd.toFixed(2)}</div>
+                <span className="text-[10px] text-rose-400/80">
+                  -{pipsRisk} pips ({riskPercent}% of equity)
+                </span>
               </div>
 
               <div className="p-2.5 rounded-xl bg-black/40 border border-neutral-800">
-                <span className="text-slate-400 block text-[10px]">Risk at Stop Loss</span>
-                <div className="text-base font-extrabold text-rose-400">-${actualRiskUsd.toFixed(2)}</div>
-                <span className="text-[10px] text-rose-400/80">{pipsRisk} pips risk</span>
+                <span className="text-slate-400 block text-[10px]">Reward at {FIXED_TP_RR}RR Target</span>
+                <div className="text-base font-extrabold text-emerald-400">+${potentialProfitUsd.toFixed(2)}</div>
+                <span className="text-[10px] text-emerald-400/80">
+                  +{pipsReward1} pips (1:{FIXED_RISK_REWARD} R:R)
+                </span>
               </div>
             </div>
           </div>
 
-          {/* CALCULATED PROTECTION & TARGET LEVELS */}
-          <div className="space-y-2">
-            <span className="text-[11px] uppercase tracking-wider text-slate-400 font-bold block">
-              Market Protection & Profit Targets
-            </span>
+          {/* CALCULATED FIXED RISK LEVELS: ENTRY, 1RR STOP LOSS, 3RR TAKE PROFIT */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
+                Fixed Risk Management Levels
+              </span>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 text-[10px] font-bold">
+                <Lock className="w-3 h-3" />
+                <span>{FIXED_SL_RR}RR SL / {FIXED_TP_RR}RR TP · {FIXED_LOT_SIZE} LOT</span>
+              </span>
+            </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-              {/* STOP LOSS */}
-              <div className="p-3 rounded-xl bg-rose-950/25 border border-rose-500/35">
-                <span className="text-[10px] uppercase text-rose-400 block font-bold">Stop Loss (SL)</span>
-                <div className="text-base font-black text-rose-300 tabular-nums my-0.5">
-                  {calculatedSL.toFixed(decimals)}
+            {!hasRequiredSlTp && (
+              <div className="p-3 rounded-xl bg-rose-950/50 border border-rose-500/50 text-rose-300 text-[11px] flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                <span>Valid Entry Price, Stop Loss ({FIXED_SL_RR}RR), and Take Profit ({FIXED_TP_RR}RR) are mandatory before opening any trade.</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {/* ENTRY PRICE */}
+              <div className="p-3 rounded-xl bg-neutral-900/80 border border-neutral-700">
+                <span className="text-[10px] uppercase text-slate-400 block font-bold">Entry Price ({direction})</span>
+                <div className="text-lg font-black text-white tabular-nums my-0.5">
+                  {fixedRisk.entryPrice > 0 ? fixedRisk.entryPrice.toFixed(decimals) : '---'}
                 </div>
-                <span className="text-[10px] text-rose-400/80">-{pipsRisk} Pips</span>
+                <span className="text-[10px] text-slate-400">{effectiveLotSize.toFixed(2)} Lot Market Entry</span>
               </div>
 
-              {/* TP1 */}
-              <div className="p-3 rounded-xl bg-emerald-950/25 border border-emerald-500/35">
-                <span className="text-[10px] uppercase text-emerald-400 block font-bold">TP1 (1:2)</span>
-                <div className="text-base font-black text-emerald-300 tabular-nums my-0.5">
-                  {calculatedTP1.toFixed(decimals)}
+              {/* FIXED 1RR STOP LOSS */}
+              <div className="p-3 rounded-xl bg-rose-950/30 border border-rose-500/45">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase text-rose-400 font-bold">Stop Loss</span>
+                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300">
+                    {FIXED_SL_RR}RR FIXED
+                  </span>
                 </div>
-                <span className="text-[10px] text-emerald-400/80">+{pipsReward1} Pips</span>
+                <div className="text-lg font-black text-rose-300 tabular-nums my-0.5">
+                  {calculatedSL > 0 ? calculatedSL.toFixed(decimals) : '---'}
+                </div>
+                <span className="text-[10px] text-rose-400/80">-{pipsRisk} Pips (-${actualRiskUsd.toFixed(2)})</span>
               </div>
 
-              {/* TP2 */}
-              <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/40">
-                <span className="text-[10px] uppercase text-emerald-400 block font-bold">TP2 (1:3)</span>
-                <div className="text-base font-black text-emerald-300 tabular-nums my-0.5">
-                  {calculatedTP2.toFixed(decimals)}
+              {/* FIXED 3RR TAKE PROFIT */}
+              <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/45">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase text-emerald-400 font-bold">Take Profit</span>
+                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
+                    {FIXED_TP_RR}RR · 1:{FIXED_RISK_REWARD}
+                  </span>
                 </div>
-                <span className="text-[10px] text-emerald-400/80">Weekly KL</span>
-              </div>
-
-              {/* TP3 */}
-              <div className="p-3 rounded-xl bg-amber-950/25 border border-amber-500/35">
-                <span className="text-[10px] uppercase text-amber-400 block font-bold">TP3 (1:5)</span>
-                <div className="text-base font-black text-amber-300 tabular-nums my-0.5">
-                  {calculatedTP3.toFixed(decimals)}
+                <div className="text-lg font-black text-emerald-300 tabular-nums my-0.5">
+                  {calculatedTP1 > 0 ? calculatedTP1.toFixed(decimals) : '---'}
                 </div>
-                <span className="text-[10px] text-amber-400/80">Macro Target</span>
+                <span className="text-[10px] text-emerald-400/80">+{pipsReward1} Pips (+${potentialProfitUsd.toFixed(2)})</span>
               </div>
             </div>
           </div>
@@ -452,10 +454,10 @@ export const MarketOrderTicketModal: React.FC<MarketOrderTicketModalProps> = ({
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0" />
               <span className="text-slate-300">
-                Risk/Reward: <strong className="text-white">1 : 2.0</strong> · Potential Gain: <strong className="text-emerald-400">+${potentialProfitUsd.toFixed(2)}</strong>
+                Fixed Risk: <strong className="text-white">1 : {FIXED_RISK_REWARD}</strong> ({FIXED_SL_RR}RR SL / {FIXED_TP_RR}RR TP · {effectiveLotSize.toFixed(2)} Lot) · Target: <strong className="text-emerald-400">+${potentialProfitUsd.toFixed(2)}</strong>
               </span>
             </div>
-            <span className="text-slate-400">Synced to Chart & History</span>
+            <span className="text-slate-400">Synced to Chart &amp; History</span>
           </div>
         </div>
 
@@ -470,7 +472,8 @@ export const MarketOrderTicketModal: React.FC<MarketOrderTicketModalProps> = ({
 
           <button
             onClick={handleExecute}
-            className={`flex-1 py-3.5 px-6 rounded-xl font-mono font-black text-sm uppercase tracking-wider flex items-center justify-center gap-2 shadow-xl transition-all active:scale-95 ${
+            disabled={!hasRequiredSlTp}
+            className={`flex-1 py-3.5 px-6 rounded-xl font-mono font-black text-sm uppercase tracking-wider flex items-center justify-center gap-2 shadow-xl transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
               isBuy
                 ? 'bg-gradient-to-r from-emerald-500 via-emerald-400 to-emerald-500 hover:from-emerald-400 hover:to-emerald-300 text-slate-950 shadow-emerald-500/30'
                 : 'bg-gradient-to-r from-rose-600 via-rose-500 to-rose-600 hover:from-rose-500 hover:to-rose-400 text-white shadow-rose-500/30'
@@ -478,7 +481,9 @@ export const MarketOrderTicketModal: React.FC<MarketOrderTicketModalProps> = ({
           >
             {isBuy ? <TrendingUp className="w-5 h-5 stroke-[3]" /> : <TrendingDown className="w-5 h-5 stroke-[3]" />}
             <span>
-              CONNECT & EXECUTE {direction} @ {marketEntryPrice.toFixed(decimals)}
+              {hasRequiredSlTp
+                ? `CONNECT & EXECUTE ${direction} @ ${fixedRisk.entryPrice.toFixed(decimals)}`
+                : 'SL & TP REQUIRED TO OPEN TRADE'}
             </span>
           </button>
         </div>

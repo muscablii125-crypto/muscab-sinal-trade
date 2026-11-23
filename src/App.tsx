@@ -3,7 +3,7 @@
  * Primary Application Entry & Orchestration
  * Real-Time WebSocket Streaming & Authentic Market Feeds
  * Includes:
- * 1. Real-time AUD/USD Forex Feed with live Bid, Ask, Mid Price and Spread
+ * 1. Real-time EUR/USD Forex Feed with live Bid, Ask, Mid Price and Spread
  * 2. High-Frequency WebSocket Streaming with live millisecond timestamps
  * 3. Exact chart candle synchronization with live market ticks
  * 4. Transparent broker selection: OANDA Retail Forex vs Binance Spot Gold ECN
@@ -21,6 +21,7 @@ import {
   Candle,
   PriceAlert,
   LiveQuoteTick,
+  LockedTradeDecision,
 } from './types/trading';
 import { SUPPORTED_INSTRUMENTS, DEFAULT_CRT_RULES } from './constants/instruments';
 import {
@@ -28,10 +29,18 @@ import {
   MarketDataset,
 } from './services/marketData';
 import { evaluateCrtSignal } from './services/crtAnalysisEngine';
+import { tradeDirectionLock } from './services/tradeDirectionLock';
 import { soundEffects } from './services/soundEffects';
 import { priceAlertsService } from './services/priceAlerts';
 import { tradeHistoryService } from './services/tradeHistory';
 import { marketStreaming } from './services/marketStreaming';
+import {
+  FIXED_SL_RR,
+  FIXED_TP_RR,
+  FIXED_RISK_REWARD,
+  FIXED_LOT_SIZE,
+  hasValidFixedSlTp,
+} from './services/fixedRiskManagement';
 import { Header } from './components/Header';
 import { HomeScreenSignalCard } from './components/HomeScreenSignalCard';
 import { SessionBanner } from './components/SessionBanner';
@@ -61,7 +70,7 @@ interface AlertToast {
 
 export default function App() {
   // Primary State
-  const [selectedInstrument, setSelectedInstrument] = useState<InstrumentId>('AUDUSD');
+  const [selectedInstrument, setSelectedInstrument] = useState<InstrumentId>('EURUSD');
   const [activeTimeframe, setActiveTimeframe] = useState<Timeframe>('5M');
   const [strategyConfig, setStrategyConfig] = useState<CrtStrategyConfig>(DEFAULT_CRT_RULES);
   const [dstOffsetHours, setDstOffsetHours] = useState<number>(0);
@@ -80,12 +89,15 @@ export default function App() {
   // Live Real-Time Market Quotes
   const [livePrices, setLivePrices] = useState<Record<InstrumentId, number>>({
     XAUUSD: SUPPORTED_INSTRUMENTS.XAUUSD.currentPrice,
-    AUDUSD: SUPPORTED_INSTRUMENTS.AUDUSD.currentPrice,
+    EURUSD: SUPPORTED_INSTRUMENTS.EURUSD.currentPrice,
     NASDAQ: SUPPORTED_INSTRUMENTS.NASDAQ.currentPrice,
   });
 
-  // Current Signal Result
+  // Current Signal Result & Fixed AI Trade Direction Lock
   const [signalResult, setSignalResult] = useState<CrtSignalResult | null>(null);
+  const [lockedDecision, setLockedDecision] = useState<LockedTradeDecision | null>(() =>
+    tradeDirectionLock.getLockedDecision('EURUSD')
+  );
   const [isSearching, setIsSearching] = useState<boolean>(false);
   const [chartLoading, setChartLoading] = useState<boolean>(false);
 
@@ -109,9 +121,25 @@ export default function App() {
   // Visual Alert Toasts
   const [toasts, setToasts] = useState<AlertToast[]>([]);
 
-  // Track current execution to avoid race conditions
+  // Track current execution & refs to avoid race conditions
   const searchIdRef = useRef<number>(0);
   const prevVerdictRef = useRef<string>('WAIT');
+  const selectedInstrumentRef = useRef<InstrumentId>(selectedInstrument);
+  const quoteTicksRef = useRef<Record<InstrumentId, LiveQuoteTick> | null>(quoteTicks);
+
+  useEffect(() => {
+    selectedInstrumentRef.current = selectedInstrument;
+    setLockedDecision(
+      tradeDirectionLock.evaluateTickOnLock(
+        selectedInstrument,
+        quoteTicksRef.current?.[selectedInstrument] || null
+      )
+    );
+  }, [selectedInstrument]);
+
+  useEffect(() => {
+    quoteTicksRef.current = quoteTicks;
+  }, [quoteTicks]);
 
   const handleToggleSound = (enabled: boolean) => {
     soundEffects.setEnabled(enabled);
@@ -169,10 +197,14 @@ export default function App() {
   useEffect(() => {
     const unsubQuotes = marketStreaming.subscribeQuotes((ticks) => {
       setQuoteTicks(ticks);
+      const activeInst = selectedInstrumentRef.current;
+      const updatedLock = tradeDirectionLock.evaluateTickOnLock(activeInst, ticks[activeInst] || null);
+      setLockedDecision(updatedLock);
+
       setLivePrices((prev) => {
         const updatedPrices: Record<InstrumentId, number> = {
           XAUUSD: ticks.XAUUSD?.midPrice > 0 ? ticks.XAUUSD.midPrice : prev.XAUUSD,
-          AUDUSD: ticks.AUDUSD?.midPrice > 0 ? ticks.AUDUSD.midPrice : prev.AUDUSD,
+          EURUSD: ticks.EURUSD?.midPrice > 0 ? ticks.EURUSD.midPrice : prev.EURUSD,
           NASDAQ: ticks.NASDAQ?.midPrice > 0 ? ticks.NASDAQ.midPrice : prev.NASDAQ,
         };
 
@@ -254,14 +286,23 @@ export default function App() {
         if (currentRun === searchIdRef.current) {
           setSignalResult(result);
 
-          // Audio chime on new BUY/SELL signal
+          const activeTick = quoteTicksRef.current?.[instrument] || null;
+          const reconciledLock = tradeDirectionLock.reconcileSignal(instrument, result, activeTick);
+          setLockedDecision(reconciledLock);
+
+          // Audio chime ONLY when a fresh locked direction is confirmed
+          const effectiveVerdict =
+            reconciledLock && (reconciledLock.lockStatus === 'LOCKED' || reconciledLock.lockStatus === 'ACTIVE')
+              ? reconciledLock.direction
+              : 'WAIT';
+
           if (
-            (result.verdict === 'BUY' || result.verdict === 'SELL') &&
-            result.verdict !== prevVerdictRef.current
+            (effectiveVerdict === 'BUY' || effectiveVerdict === 'SELL') &&
+            effectiveVerdict !== prevVerdictRef.current
           ) {
-            soundEffects.playSignalChime(result.verdict);
+            soundEffects.playSignalChime(effectiveVerdict);
           }
-          prevVerdictRef.current = result.verdict;
+          prevVerdictRef.current = effectiveVerdict;
 
           if (result.entryPrice > 0 && result.liveFeedStatus === 'LIVE_CONNECTED') {
             setLivePrices((prev) => ({
@@ -286,10 +327,33 @@ export default function App() {
     runCrtAnalysis(selectedInstrument, strategyConfig, broker);
   }, [selectedInstrument, strategyConfig, broker, runCrtAnalysis]);
 
+  // Periodic background confirmation check every 30s (promotes Stage 1 -> Stage 2 on 5M candle close without flipping locked decisions)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      runCrtAnalysis(selectedInstrument, strategyConfig, broker);
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, [selectedInstrument, strategyConfig, broker, runCrtAnalysis]);
+
   // Manual Refresh / Search Signal Button Click
   const handleSearchSignal = () => {
     marketStreaming.pollHttpQuotes();
     loadChartData(selectedInstrument, activeTimeframe, broker);
+    runCrtAnalysis(selectedInstrument, strategyConfig, broker);
+  };
+
+  const handleCloseLockedDecision = () => {
+    const updated = tradeDirectionLock.closeLockedDecision(
+      selectedInstrument,
+      quoteTicksRef.current?.[selectedInstrument] || null
+    );
+    setLockedDecision(updated);
+    soundEffects.playAlertChime();
+  };
+
+  const handleResetFinishedLock = () => {
+    tradeDirectionLock.unlockFinishedDecision(selectedInstrument);
+    setLockedDecision(null);
     runCrtAnalysis(selectedInstrument, strategyConfig, broker);
   };
 
@@ -300,6 +364,17 @@ export default function App() {
   };
 
   const handleLogCurrentTrade = (signal: CrtSignalResult) => {
+    if (
+      (signal.verdict !== 'BUY' && signal.verdict !== 'SELL') ||
+      !hasValidFixedSlTp(
+        signal.entryPrice,
+        signal.stopLoss,
+        signal.takeProfit ?? signal.takeProfit1,
+        signal.verdict
+      )
+    ) {
+      return;
+    }
     tradeHistoryService.addFromSignal(signal);
   };
 
@@ -328,7 +403,7 @@ export default function App() {
 
       {/* Main Workspace Canvas */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {/* PRIMARY HERO: Home Screen AUD/USD Live Market Price & BUY / SELL / WAIT Display */}
+        {/* PRIMARY HERO: Home Screen EUR/USD Live Market Price & BUY / SELL / WAIT Display */}
         <section id="home-signal-hero">
           <HomeScreenSignalCard
             selectedInstrument={selectedInstrument}
@@ -338,6 +413,9 @@ export default function App() {
             broker={broker}
             onToggleBroker={handleBrokerChange}
             signal={signalResult}
+            lockedDecision={lockedDecision}
+            onCloseLockedDecision={handleCloseLockedDecision}
+            onResetFinishedLock={handleResetFinishedLock}
             isSearching={isSearching}
             onSearchSignal={handleSearchSignal}
             onRefreshQuotes={() => marketStreaming.pollHttpQuotes()}
@@ -355,7 +433,7 @@ export default function App() {
           />
         </section>
 
-        {/* Section 3: Instrument Selector (XAUUSD, AUDUSD, NASDAQ) */}
+        {/* Section 3: Instrument Selector (XAUUSD, EURUSD, NASDAQ) */}
         <section id="instruments">
           <InstrumentSelector
             selectedInstrument={selectedInstrument}
@@ -380,6 +458,7 @@ export default function App() {
         <section id="dashboard" className="space-y-4">
           <SignalResultCard
             signal={signalResult}
+            lockedDecision={lockedDecision}
             onOpenAiAudit={() => setIsAiAuditOpen(true)}
             onLogTrade={handleLogCurrentTrade}
           />
@@ -441,8 +520,8 @@ export default function App() {
             <div className="flex items-center gap-3 text-xs font-mono text-slate-400">
               <a
                 href={`https://www.tradingview.com/chart/?symbol=${
-                  selectedInstrument === 'AUDUSD'
-                    ? 'OANDA%3AAUDUSD'
+                  selectedInstrument === 'EURUSD'
+                    ? 'OANDA%3AEURUSD'
                     : selectedInstrument === 'XAUUSD'
                     ? 'OANDA%3AXAUUSD'
                     : 'NASDAQ%3ANDX'
@@ -517,8 +596,17 @@ export default function App() {
         onClose={() => setIsConfigOpen(false)}
         config={strategyConfig}
         onSaveConfig={(newConfig) => {
-          setStrategyConfig(newConfig);
-          runCrtAnalysis(selectedInstrument, newConfig, broker);
+          const lockedConfig: CrtStrategyConfig = {
+            ...newConfig,
+            tp1Ratio: FIXED_RISK_REWARD,
+            tp2Ratio: FIXED_RISK_REWARD,
+            tp3Ratio: FIXED_RISK_REWARD,
+            slRR: FIXED_SL_RR,
+            tpRR: FIXED_TP_RR,
+            lotSize: FIXED_LOT_SIZE,
+          };
+          setStrategyConfig(lockedConfig);
+          runCrtAnalysis(selectedInstrument, lockedConfig, broker);
         }}
       />
 

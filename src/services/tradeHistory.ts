@@ -5,6 +5,7 @@
 
 import { TradeHistoryItem, CrtSignalResult } from '../types/trading';
 import { SUPPORTED_INSTRUMENTS } from '../constants/instruments';
+import { FIXED_LOT_SIZE, calculateFixedRiskLevels, hasValidFixedSlTp } from './fixedRiskManagement';
 
 const STORAGE_KEY = 'muscab_trade_history';
 
@@ -17,33 +18,33 @@ const DEFAULT_SEEDED_TRADES: TradeHistoryItem[] = [
     instrument: 'XAUUSD',
     direction: 'BUY',
     entryPrice: 4058.40,
-    stopLoss: 4051.80,
-    takeProfit1: 4065.00,
-    takeProfit2: 4071.60,
-    takeProfit3: 4085.00,
-    targetLevel: 'PDH (Previous Day High)',
-    targetPrice: 4071.60,
+    stopLoss: 4051.90,
+    takeProfit1: 4077.90,
+    takeProfit2: 4077.90,
+    takeProfit3: 4077.90,
+    targetLevel: '3RR Target (1:3)',
+    targetPrice: 4077.90,
     result: 'WIN',
-    pnlPips: 66.0,
-    model: '5M TS + 5M SMT Model 1',
+    pnlPips: 195.0,
+    model: '5M TS + 5M SMT Model 1 (1RR SL / 3RR TP · 1 Lot)',
   },
   {
     id: 'trade_sample_2',
     date: '2026-11-08',
     time: '11:10 UTC+3',
     timestamp: Date.now() - 1000 * 60 * 230,
-    instrument: 'AUDUSD',
+    instrument: 'EURUSD',
     direction: 'SELL',
-    entryPrice: 0.65140,
-    stopLoss: 0.65230,
-    takeProfit1: 0.64960,
-    takeProfit2: 0.64850,
-    takeProfit3: 0.64600,
-    targetLevel: 'PDL (Previous Day Low)',
-    targetPrice: 0.64960,
+    entryPrice: 1.08580,
+    stopLoss: 1.08730,
+    takeProfit1: 1.08130,
+    takeProfit2: 1.08130,
+    takeProfit3: 1.08130,
+    targetLevel: '3RR Target (1:3)',
+    targetPrice: 1.08130,
     result: 'WIN',
-    pnlPips: 18.0,
-    model: '1H Purge + Asian High Sweep',
+    pnlPips: 45.0,
+    model: '1H Purge + Asian High Sweep (1RR SL / 3RR TP · 1 Lot)',
   },
   {
     id: 'trade_sample_3',
@@ -53,15 +54,15 @@ const DEFAULT_SEEDED_TRADES: TradeHistoryItem[] = [
     instrument: 'NASDAQ',
     direction: 'BUY',
     entryPrice: 21455.0,
-    stopLoss: 21415.0,
-    takeProfit1: 21535.0,
-    takeProfit2: 21615.0,
-    takeProfit3: 21750.0,
-    targetLevel: 'PWH (Previous Week High)',
-    targetPrice: 21615.0,
+    stopLoss: 21405.0,
+    takeProfit1: 21605.0,
+    takeProfit2: 21605.0,
+    takeProfit3: 21605.0,
+    targetLevel: '3RR Target (1:3)',
+    targetPrice: 21605.0,
     result: 'WIN',
-    pnlPips: 80.0,
-    model: '5M SMT + NY AM Displacement',
+    pnlPips: 150.0,
+    model: '5M SMT + NY AM Displacement (1RR SL / 3RR TP · 1 Lot)',
   },
   {
     id: 'trade_sample_4',
@@ -71,33 +72,33 @@ const DEFAULT_SEEDED_TRADES: TradeHistoryItem[] = [
     instrument: 'XAUUSD',
     direction: 'SELL',
     entryPrice: 4048.20,
-    stopLoss: 4054.60,
-    takeProfit1: 4035.40,
-    takeProfit2: 4022.60,
-    takeProfit3: 4005.00,
-    targetLevel: 'PWL (Previous Week Low)',
-    targetPrice: 4035.40,
+    stopLoss: 4054.70,
+    takeProfit1: 4028.70,
+    takeProfit2: 4028.70,
+    takeProfit3: 4028.70,
+    targetLevel: '3RR Target (1:3)',
+    targetPrice: 4028.70,
     result: 'LOSS',
-    pnlPips: -64.0,
-    model: '1H KL Retest Rejection',
+    pnlPips: -65.0,
+    model: '1H KL Retest Rejection (1RR SL / 3RR TP · 1 Lot)',
   },
   {
     id: 'trade_sample_5',
     date: '2026-11-06',
     time: '16:05 UTC+3',
     timestamp: Date.now() - 1000 * 60 * 60 * 46,
-    instrument: 'AUDUSD',
+    instrument: 'EURUSD',
     direction: 'BUY',
-    entryPrice: 0.64820,
-    stopLoss: 0.64730,
-    takeProfit1: 0.65000,
-    takeProfit2: 0.65180,
-    takeProfit3: 0.65450,
-    targetLevel: 'PMH (Previous Month High)',
-    targetPrice: 0.65000,
+    entryPrice: 1.08310,
+    stopLoss: 1.08160,
+    takeProfit1: 1.08760,
+    takeProfit2: 1.08760,
+    takeProfit3: 1.08760,
+    targetLevel: '3RR Target (1:3)',
+    targetPrice: 1.08760,
     result: 'WIN',
-    pnlPips: 18.0,
-    model: 'London Open Purge + Model 1',
+    pnlPips: 45.0,
+    model: 'London Open Purge + Model 1 (1RR SL / 3RR TP · 1 Lot)',
   },
   {
     id: 'trade_sample_6',
@@ -107,15 +108,15 @@ const DEFAULT_SEEDED_TRADES: TradeHistoryItem[] = [
     instrument: 'XAUUSD',
     direction: 'BUY',
     entryPrice: 4022.50,
-    stopLoss: 4014.50,
-    takeProfit1: 4038.50,
-    takeProfit2: 4054.50,
-    takeProfit3: 4075.00,
-    targetLevel: 'PDH (Previous Day High)',
-    targetPrice: 4038.50,
+    stopLoss: 4016.00,
+    takeProfit1: 4042.00,
+    takeProfit2: 4042.00,
+    takeProfit3: 4042.00,
+    targetLevel: '3RR Target (1:3)',
+    targetPrice: 4042.00,
     result: 'WIN',
-    pnlPips: 160.0,
-    model: 'Asian Session Turtle Soup Sweep',
+    pnlPips: 195.0,
+    model: 'Asian Session Turtle Soup Sweep (1RR SL / 3RR TP · 1 Lot)',
   },
   {
     id: 'trade_sample_7',
@@ -125,15 +126,15 @@ const DEFAULT_SEEDED_TRADES: TradeHistoryItem[] = [
     instrument: 'NASDAQ',
     direction: 'SELL',
     entryPrice: 21640.0,
-    stopLoss: 21695.0,
-    takeProfit1: 21530.0,
-    takeProfit2: 21420.0,
-    takeProfit3: 21250.0,
-    targetLevel: 'PDL (Previous Day Low)',
-    targetPrice: 21530.0,
+    stopLoss: 21690.0,
+    takeProfit1: 21490.0,
+    takeProfit2: 21490.0,
+    takeProfit3: 21490.0,
+    targetLevel: '3RR Target (1:3)',
+    targetPrice: 21490.0,
     result: 'WIN',
-    pnlPips: 110.0,
-    model: 'Weekly OB Mitigation + SMT',
+    pnlPips: 150.0,
+    model: 'Weekly OB Mitigation + SMT (1RR SL / 3RR TP · 1 Lot)',
   },
   {
     id: 'trade_sample_8',
@@ -144,14 +145,14 @@ const DEFAULT_SEEDED_TRADES: TradeHistoryItem[] = [
     direction: 'SELL',
     entryPrice: 4034.00,
     stopLoss: 4040.50,
-    takeProfit1: 4021.00,
-    takeProfit2: 4008.00,
-    takeProfit3: 3990.00,
-    targetLevel: 'PDL (Previous Day Low)',
-    targetPrice: 4021.00,
+    takeProfit1: 4014.50,
+    takeProfit2: 4014.50,
+    takeProfit3: 4014.50,
+    targetLevel: '3RR Target (1:3)',
+    targetPrice: 4014.50,
     result: 'WIN',
-    pnlPips: 130.0,
-    model: '5M TS Displacement + 1H Purge',
+    pnlPips: 195.0,
+    model: '5M TS Displacement + 1H Purge (1RR SL / 3RR TP · 1 Lot)',
   },
 ];
 
@@ -166,7 +167,15 @@ class TradeHistoryService {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-        this.history = JSON.parse(stored);
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          this.history = parsed.filter((t: TradeHistoryItem) => t.instrument in SUPPORTED_INSTRUMENTS);
+          if (this.history.length !== parsed.length) {
+            this.saveHistory();
+          }
+        } else {
+          this.history = [...DEFAULT_SEEDED_TRADES];
+        }
       } else {
         this.history = [...DEFAULT_SEEDED_TRADES];
         this.saveHistory();
@@ -189,7 +198,19 @@ class TradeHistoryService {
   }
 
   public addFromSignal(signal: CrtSignalResult): TradeHistoryItem {
-    const inst = SUPPORTED_INSTRUMENTS[signal.instrument];
+    const direction: 'BUY' | 'SELL' = signal.verdict === 'SELL' ? 'SELL' : 'BUY';
+    const fixed = calculateFixedRiskLevels(signal.entryPrice, direction, signal.instrument, signal.stopLoss);
+
+    // Enforce Rule: Never open a trade without valid 1RR SL and 3RR TP
+    if (
+      !fixed.valid ||
+      !hasValidFixedSlTp(fixed.entryPrice, fixed.stopLoss, fixed.takeProfit, direction) ||
+      signal.stopLoss <= 0 ||
+      (signal.takeProfit ?? signal.takeProfit1) <= 0
+    ) {
+      throw new Error('Cannot open or log trade without valid 1RR Stop Loss and 3RR Take Profit.');
+    }
+
     const now = new Date();
     // Somalia Time is UTC+3
     const somaliaNow = new Date(now.getTime() + 3 * 3600 * 1000);
@@ -202,17 +223,17 @@ class TradeHistoryService {
       time: timeStr,
       timestamp: Date.now(),
       instrument: signal.instrument,
-      direction: signal.verdict === 'SELL' ? 'SELL' : 'BUY',
-      entryPrice: signal.entryPrice,
-      stopLoss: signal.stopLoss,
-      takeProfit1: signal.takeProfit1,
-      takeProfit2: signal.takeProfit2,
-      takeProfit3: signal.takeProfit3,
-      targetLevel: signal.targetLiquidityName || 'Key Liquidity Pool',
-      targetPrice: signal.targetLiquidityPrice || signal.takeProfit1,
+      direction,
+      entryPrice: fixed.entryPrice,
+      stopLoss: fixed.stopLoss,
+      takeProfit1: fixed.takeProfit,
+      takeProfit2: fixed.takeProfit,
+      takeProfit3: fixed.takeProfit,
+      targetLevel: '3RR Target (1:3)',
+      targetPrice: fixed.takeProfit,
       result: 'IN_PROGRESS',
       pnlPips: 0,
-      model: `${signal.fiveMinTsConfirmation ? '5M TS' : '5M Model 1'}${signal.fiveMinSmtConfirmation ? ' + 5M SMT' : ''}`,
+      model: `${signal.fiveMinTsConfirmation ? '5M TS' : '5M Model 1'}${signal.fiveMinSmtConfirmation ? ' + 5M SMT' : ''} (1RR SL / 3RR TP · ${FIXED_LOT_SIZE} Lot)`,
     };
 
     this.history = [newItem, ...this.history];

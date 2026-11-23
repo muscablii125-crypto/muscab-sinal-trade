@@ -7,8 +7,15 @@
  */
 
 import React, { useState } from 'react';
-import { CrtSignalResult } from '../types/trading';
+import { CrtSignalResult, LockedTradeDecision } from '../types/trading';
 import { SUPPORTED_INSTRUMENTS } from '../constants/instruments';
+import {
+  FIXED_SL_RR,
+  FIXED_TP_RR,
+  FIXED_RISK_REWARD,
+  FIXED_LOT_SIZE,
+  hasValidFixedSlTp,
+} from '../services/fixedRiskManagement';
 import {
   TrendingUp,
   TrendingDown,
@@ -25,16 +32,19 @@ import {
   BookmarkPlus,
   Flame,
   Zap,
+  Lock,
 } from 'lucide-react';
 
 interface SignalResultCardProps {
   signal: CrtSignalResult | null;
+  lockedDecision?: LockedTradeDecision | null;
   onOpenAiAudit: () => void;
   onLogTrade?: (signal: CrtSignalResult) => void;
 }
 
 export const SignalResultCard: React.FC<SignalResultCardProps> = ({
   signal,
+  lockedDecision,
   onOpenAiAudit,
   onLogTrade,
 }) => {
@@ -91,34 +101,50 @@ export const SignalResultCard: React.FC<SignalResultCardProps> = ({
     );
   }
 
-  const isBuy = signal.verdict === 'BUY';
-  const isSell = signal.verdict === 'SELL';
-  const isWait = signal.verdict === 'WAIT';
-  const isConfirmed = signal.status === 'CONFIRMED_SIGNAL';
-  const isDetected = signal.status === 'DETECTED_SETUP';
+  const isActivelyLocked =
+    lockedDecision !== null &&
+    lockedDecision !== undefined &&
+    (lockedDecision.lockStatus === 'LOCKED' || lockedDecision.lockStatus === 'ACTIVE');
+
+  const effectiveVerdict = isActivelyLocked ? lockedDecision.direction : signal.verdict;
+  const isBuy = effectiveVerdict === 'BUY';
+  const isSell = effectiveVerdict === 'SELL';
+  const isWait = effectiveVerdict === 'WAIT';
+  const isConfirmed = isActivelyLocked || signal.status === 'CONFIRMED_SIGNAL';
+  const isDetected = !isActivelyLocked && signal.status === 'DETECTED_SETUP';
+  const isInvalid = !isActivelyLocked && (signal.status === 'INVALID_SETUP' || lockedDecision?.lockStatus === 'INVALIDATED');
+  const displaySignal = isActivelyLocked ? lockedDecision.originalSignal : signal;
 
   const instrumentInfo = SUPPORTED_INSTRUMENTS[signal.instrument];
   const decimals = instrumentInfo.decimals;
 
+  const displayedEntry = isActivelyLocked ? lockedDecision.entryPrice : signal.entryPrice;
+  const displayedSl = isActivelyLocked ? lockedDecision.stopLoss : signal.stopLoss;
+  const displayedTp = isActivelyLocked
+    ? (lockedDecision.takeProfit ?? lockedDecision.takeProfit1)
+    : (signal.takeProfit ?? signal.takeProfit1);
+
+  const canLogValidTrade =
+    (effectiveVerdict === 'BUY' || effectiveVerdict === 'SELL') &&
+    hasValidFixedSlTp(displayedEntry, displayedSl, displayedTp, effectiveVerdict);
+
   const handleCopy = () => {
     const text = `MUSCAB CRT PRO - FOREX SIGNAL
 Instrument: ${signal.instrumentName} (${signal.instrument})
-Verdict: ${signal.verdict} (${isConfirmed ? 'CONFIRMED SIGNAL' : 'DETECTED SETUP'})
+Verdict: ${effectiveVerdict} (${isActivelyLocked ? lockedDecision.lockStatus : signal.twoStageStatus || signal.status})
 Session: ${signal.tradingSession}
-Target Pool: ${signal.targetLiquidityName} (${signal.targetLiquidityPrice})
-Entry Price: ${signal.entryPrice}
-Stop Loss: ${signal.stopLoss}
-TP1 (1:${signal.riskReward1}): ${signal.takeProfit1}
-TP2 (1:${signal.riskReward2}): ${signal.takeProfit2}
-TP3 (1:${signal.riskReward3} / Monthly): ${signal.takeProfit3}
-Risk: ${signal.pipsRisk} pips | TP1: ${signal.pipsReward1} pips
-5M TS: ${signal.fiveMinTsConfirmation ? 'CONFIRMED' : 'WAITING'}
-5M SMT: ${signal.fiveMinSmtConfirmation ? 'CONFIRMED' : 'WAITING'}
+Lot Size: ${FIXED_LOT_SIZE}.00 Standard Lot
+Entry Price: ${displayedEntry > 0 ? displayedEntry.toFixed(decimals) : '---'}
+Stop Loss (${FIXED_SL_RR}RR Fixed): ${displayedSl > 0 ? displayedSl.toFixed(decimals) : '---'} (-${displaySignal.pipsRisk} pips)
+Take Profit (${FIXED_TP_RR}RR Target · 1:${FIXED_RISK_REWARD}): ${displayedTp > 0 ? displayedTp.toFixed(decimals) : '---'} (+${displaySignal.pipsReward1} pips)
+Target Pool: ${displaySignal.targetLiquidityName} (${displaySignal.targetLiquidityPrice})
+5M TS: ${displaySignal.fiveMinTsConfirmation ? 'CONFIRMED' : 'WAITING'}
+5M SMT: ${displaySignal.fiveMinSmtConfirmation ? 'CONFIRMED' : 'WAITING'}
 Confirmations:
-- Monthly: ${signal.monthlyDirection}
-- Weekly: ${signal.weeklyDirection}
-- 1H Confirmed: ${signal.hourlyConfirmation ? 'YES' : 'NO'}
-- 5M SMT Model 1: ${signal.fiveMinModel1Confirmation ? 'YES' : 'NO'}`;
+- Monthly: ${displaySignal.monthlyDirection}
+- Weekly: ${displaySignal.weeklyDirection}
+- 1H Confirmed: ${displaySignal.hourlyConfirmation ? 'YES' : 'NO'}
+- 5M SMT Model 1: ${displaySignal.fiveMinModel1Confirmation ? 'YES' : 'NO'}`;
 
     navigator.clipboard.writeText(text);
     setCopied(true);
@@ -126,11 +152,10 @@ Confirmations:
   };
 
   const handleLogTrade = () => {
-    if (onLogTrade) {
-      onLogTrade(signal);
-      setLogged(true);
-      setTimeout(() => setLogged(false), 2500);
-    }
+    if (!canLogValidTrade || !onLogTrade) return;
+    onLogTrade(displaySignal);
+    setLogged(true);
+    setTimeout(() => setLogged(false), 2500);
   };
 
   const liq = signal.liquidityLevels;
@@ -161,7 +186,8 @@ Confirmations:
             {isBuy && <TrendingUp className="w-5 h-5 stroke-[2.5]" />}
             {isSell && <TrendingDown className="w-5 h-5 stroke-[2.5]" />}
             {isWait && <PauseCircle className="w-5 h-5 stroke-[2.5]" />}
-            <span>{isWait ? 'WAIT FOR SETUP' : `${signal.verdict} SIGNAL`}</span>
+            <span>{isWait ? 'WAIT FOR SETUP' : `${effectiveVerdict} SIGNAL`}</span>
+            {isActivelyLocked && <Lock className="w-4 h-4 ml-1" />}
           </div>
 
           <div>
@@ -173,16 +199,17 @@ Confirmations:
                 {signal.instrument}
               </span>
             </div>
-            <div className="text-xs text-slate-400 font-mono mt-0.5 flex items-center gap-2">
+            <div className="text-xs text-slate-400 font-mono mt-0.5 flex flex-wrap items-center gap-2">
               <Clock className="w-3.5 h-3.5 text-slate-400" />
               <span>Session: <strong className="text-slate-200">{signal.tradingSession}</strong></span>
               <span className="text-neutral-600">·</span>
               <span>
-                {signal.isInsideSession ? (
-                  <span className="text-emerald-400 font-semibold">Inside Active Session</span>
-                ) : (
-                  <span className="text-amber-400/80">Outside Session</span>
-                )}
+                5M Candle Close:{' '}
+                <strong className="text-amber-300">
+                  {displaySignal.confirmationCandleCloseTime
+                    ? new Date(displaySignal.confirmationCandleCloseTime).toLocaleTimeString()
+                    : 'Pending'}
+                </strong>
               </span>
             </div>
           </div>
@@ -192,7 +219,7 @@ Confirmations:
         <div className="flex items-center gap-2.5">
           <div className="text-right hidden sm:block">
             <span className="text-[10px] uppercase font-mono tracking-wider text-slate-400 block">
-              Signal Status
+              Two-Stage & Lock Status
             </span>
             <span
               className={`text-xs font-mono font-bold px-2 py-1 rounded inline-block mt-0.5 border ${
@@ -200,23 +227,32 @@ Confirmations:
                   ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/40'
                   : isDetected
                   ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                  : isInvalid
+                  ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
                   : 'bg-neutral-800 text-slate-400 border-neutral-700'
               }`}
             >
-              {isConfirmed
-                ? 'CONFIRMED TRADING SIGNAL'
+              {isActivelyLocked
+                ? `${lockedDecision.lockStatus} · CONFIRMED`
+                : isConfirmed
+                ? 'CONFIRMED'
                 : isDetected
-                ? 'DETECTED SETUP (PENDING CONFIRMATION)'
-                : 'WAIT FOR SETUP'}
+                ? 'WAITING FOR MARKET CONFIRMATION'
+                : lockedDecision?.lockStatus === 'CLOSED'
+                ? 'CLOSED — SCANNING NEW'
+                : isInvalid
+                ? 'INVALID'
+                : 'WAIT'}
             </span>
           </div>
 
-          {/* Log to Trade History Button */}
+          {/* Log to Trade History Button (Only when SL & TP are valid) */}
           {onLogTrade && (
             <button
               onClick={handleLogTrade}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-mono font-bold transition-all shadow-md shadow-amber-500/20 active:scale-95"
-              title="Record this setup outcome in Trade History"
+              disabled={!canLogValidTrade}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 text-xs font-mono font-bold transition-all shadow-md shadow-amber-500/20 active:scale-95"
+              title={canLogValidTrade ? 'Record this setup outcome in Trade History' : 'Confirmed signal with 1RR SL & 3RR TP required'}
             >
               {logged ? (
                 <>
@@ -253,82 +289,60 @@ Confirmations:
         </div>
       </div>
 
-      {/* Main Trade Parameters Grid (Entry, SL, TP1, TP2, TP3) */}
+      {/* Main Fixed Risk Management Grid (Entry, 1RR SL, 3RR TP · Lot Size 1) */}
       <div className="p-6">
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-5">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 mb-5">
           {/* Entry Price */}
-          <div className="bg-neutral-900/80 border border-neutral-800 rounded-xl p-3.5 flex flex-col">
-            <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
-              Entry Price
-            </span>
-            <span className="text-xl font-mono font-extrabold text-white tabular-nums mt-1">
-              {signal.entryPrice.toFixed(decimals)}
-            </span>
-            <span className="text-[10px] font-mono text-slate-400 mt-1">Market Trigger</span>
-          </div>
-
-          {/* Stop Loss (SL) */}
-          <div className="bg-rose-950/20 border border-rose-500/30 rounded-xl p-3.5 flex flex-col">
-            <span className="text-[11px] font-mono uppercase tracking-wider text-rose-400">
-              Stop Loss (SL)
-            </span>
-            <span className="text-xl font-mono font-extrabold text-rose-400 tabular-nums mt-1">
-              {signal.stopLoss.toFixed(decimals)}
-            </span>
-            <span className="text-[10px] font-mono text-rose-300/70 mt-1">
-              Risk: {signal.pipsRisk} pips
-            </span>
-          </div>
-
-          {/* TP 1 */}
-          <div className="bg-emerald-950/20 border border-emerald-500/30 rounded-xl p-3.5 flex flex-col">
+          <div className="bg-neutral-900/80 border border-neutral-800 rounded-xl p-4 flex flex-col">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
-                Take Profit 1
+              <span className="text-[11px] font-mono uppercase tracking-wider text-slate-400 font-bold">
+                Entry Price
               </span>
-              <span className="text-[10px] font-mono font-bold text-emerald-300 bg-emerald-500/10 px-1 rounded">
-                1:{signal.riskReward1}
+              <span className="text-[10px] font-mono font-bold text-amber-300 bg-amber-500/15 px-1.5 py-0.5 rounded border border-amber-500/30">
+                {FIXED_LOT_SIZE}.00 LOT
               </span>
             </div>
-            <span className="text-xl font-mono font-extrabold text-emerald-400 tabular-nums mt-1">
-              {signal.takeProfit1.toFixed(decimals)}
+            <span className="text-2xl font-mono font-extrabold text-white tabular-nums mt-1">
+              {displayedEntry > 0 ? displayedEntry.toFixed(decimals) : '---'}
             </span>
-            <span className="text-[10px] font-mono text-emerald-300/70 mt-1">
-              Gain: +{signal.pipsReward1} pips
+            <span className="text-[10px] font-mono text-slate-400 mt-1">
+              {isActivelyLocked ? 'Locked Entry (1 Lot)' : isWait ? 'Current Reference Price' : 'Actual Market Trigger'}
             </span>
           </div>
 
-          {/* TP 2 */}
-          <div className="bg-emerald-950/30 border border-emerald-500/40 rounded-xl p-3.5 flex flex-col">
+          {/* Fixed 1RR Stop Loss */}
+          <div className="bg-rose-950/25 border border-rose-500/40 rounded-xl p-4 flex flex-col">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
-                Take Profit 2
+              <span className="text-[11px] font-mono uppercase tracking-wider text-rose-400 font-bold">
+                Stop Loss (SL)
               </span>
-              <span className="text-[10px] font-mono font-bold text-emerald-300 bg-emerald-500/10 px-1 rounded">
-                1:{signal.riskReward2}
+              <span className="text-[10px] font-mono font-bold text-rose-300 bg-rose-500/15 px-1.5 py-0.5 rounded border border-rose-500/30">
+                {FIXED_SL_RR}RR FIXED
               </span>
             </div>
-            <span className="text-xl font-mono font-extrabold text-emerald-400 tabular-nums mt-1">
-              {signal.takeProfit2.toFixed(decimals)}
+            <span className="text-2xl font-mono font-extrabold text-rose-400 tabular-nums mt-1">
+              {displayedSl > 0 ? displayedSl.toFixed(decimals) : '---'}
             </span>
-            <span className="text-[10px] font-mono text-emerald-300/70 mt-1">Weekly KL Target</span>
+            <span className="text-[10px] font-mono text-rose-300/80 mt-1">
+              {displayedSl > 0 ? `1RR Risk: -${displaySignal.pipsRisk} pips` : 'Awaiting valid entry'}
+            </span>
           </div>
 
-          {/* TP 3 (Monthly Target) */}
-          <div className="col-span-2 sm:col-span-1 bg-amber-950/30 border border-amber-500/40 rounded-xl p-3.5 flex flex-col">
+          {/* Fixed 3RR Take Profit */}
+          <div className="bg-emerald-950/25 border border-emerald-500/40 rounded-xl p-4 flex flex-col">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono uppercase tracking-wider text-amber-400 flex items-center gap-1">
-                <Target className="w-3 h-3" /> TP 3 (Monthly)
+              <span className="text-[11px] font-mono uppercase tracking-wider text-emerald-400 font-bold flex items-center gap-1">
+                <Target className="w-3.5 h-3.5" /> Take Profit (TP)
               </span>
-              <span className="text-[10px] font-mono font-bold text-amber-300 bg-amber-500/10 px-1 rounded">
-                1:{signal.riskReward3}
+              <span className="text-[10px] font-mono font-bold text-emerald-300 bg-emerald-500/15 px-1.5 py-0.5 rounded border border-emerald-500/30">
+                {FIXED_TP_RR}RR TARGET · 1:{FIXED_RISK_REWARD}
               </span>
             </div>
-            <span className="text-xl font-mono font-extrabold text-amber-400 tabular-nums mt-1">
-              {signal.takeProfit3.toFixed(decimals)}
+            <span className="text-2xl font-mono font-extrabold text-emerald-400 tabular-nums mt-1">
+              {displayedTp > 0 ? displayedTp.toFixed(decimals) : '---'}
             </span>
-            <span className="text-[10px] font-mono text-amber-300/70 mt-1 truncate">
-              Macro Target Pool
+            <span className="text-[10px] font-mono text-emerald-300/80 mt-1">
+              {displayedTp > 0 ? `3RR Gain: +${displaySignal.pipsReward1} pips` : 'Awaiting valid entry'}
             </span>
           </div>
         </div>

@@ -1,6 +1,6 @@
 /**
  * Supported Trading Instruments & CRT Strategy Defaults
- * Strictly limited to XAUUSD, AUDUSD, and NASDAQ.
+ * Strictly limited to XAUUSD, EURUSD, and NASDAQ.
  * Live prices are dynamically populated by genuine institutional APIs.
  */
 
@@ -27,25 +27,25 @@ export const SUPPORTED_INSTRUMENTS: Record<InstrumentId, InstrumentInfo> = {
     apiSymbol: 'PAXGUSDT / GC=F',
     unit: 'USD per Troy Ounce',
   },
-  AUDUSD: {
-    id: 'AUDUSD',
-    name: 'AUDUSD – Australian Dollar / US Dollar',
-    ticker: 'AUDUSD',
+  EURUSD: {
+    id: 'EURUSD',
+    name: 'EURUSD – Euro / US Dollar',
+    ticker: 'EURUSD',
     category: 'Forex',
     pipSize: 0.0001,
     decimals: 5,
-    correlatedPair: 'NZDUSD (Kiwi)',
-    description: 'Australian Dollar spot quote in USD (100,000 units)',
-    currentPrice: 0.6902, // Baseline updated continuously by live market API
-    change24h: -0.39,
-    contractSize: '100,000 AUD',
+    correlatedPair: 'GBPUSD (Cable)',
+    description: 'Euro spot quote in USD (100,000 units)',
+    currentPrice: 1.085, // Baseline updated continuously by live market API
+    change24h: 0.18,
+    contractSize: '100,000 EUR',
     spreadPips: 0.8,
     tickValuePerLot: 10.0,
     cfdType: 'Major FX Spot',
     provider: 'Yahoo Finance FX ECN',
     dataProvider: 'Yahoo Finance FX ECN',
-    apiSymbol: 'AUDUSD=X',
-    unit: 'USD per AUD',
+    apiSymbol: 'EURUSD=X',
+    unit: 'USD per EUR',
   },
   NASDAQ: {
     id: 'NASDAQ',
@@ -69,7 +69,7 @@ export const SUPPORTED_INSTRUMENTS: Record<InstrumentId, InstrumentInfo> = {
   },
 };
 
-export const INSTRUMENT_LIST: InstrumentId[] = ['XAUUSD', 'AUDUSD', 'NASDAQ'];
+export const INSTRUMENT_LIST: InstrumentId[] = ['XAUUSD', 'EURUSD', 'NASDAQ'];
 
 export const DEFAULT_CRT_RULES: CrtStrategyConfig = {
   // Turtle Soup (TS) Rules
@@ -97,9 +97,12 @@ export const DEFAULT_CRT_RULES: CrtStrategyConfig = {
   smtLookbackBars: 20,
   smtSensitivity: 'BALANCED',
 
-  // R:R Target Ratios
-  tp1Ratio: 2.0,
-  tp2Ratio: 3.5,
-  tp3Ratio: 5.0,
+  // Fixed Risk Management (1RR Stop Loss / 3RR Take Profit -> 1:3 Fixed R:R, Lot Size 1)
+  tp1Ratio: 3.0,
+  tp2Ratio: 3.0,
+  tp3Ratio: 3.0,
   slBufferPips: 4.0,
+  slRR: 1,
+  tpRR: 3,
+  lotSize: 1,
 };

@@ -1,6 +1,6 @@
 /**
  * High-Contrast Instrument Selector
- * Strictly supports ONLY: XAUUSD, AUDUSD, NASDAQ
+ * Strictly supports ONLY: XAUUSD, EURUSD, NASDAQ
  */
 
 import React from 'react';

@@ -294,7 +294,7 @@ export const SupportModal: React.FC<SupportModalProps> = ({
                   type="text"
                   value={subject}
                   onChange={(e) => setSubject(e.target.value)}
-                  placeholder="e.g. AUD/USD MT5 Price latency or Chart Ray drawing question"
+                  placeholder="e.g. EUR/USD MT5 Price latency or Chart Ray drawing question"
                   required
                   className="w-full px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 focus:border-amber-500 text-sm text-white focus:outline-none transition-colors"
                 />
@@ -322,7 +322,7 @@ export const SupportModal: React.FC<SupportModalProps> = ({
                   <span>Auto-Attached Diagnostics:</span>
                 </span>
                 <span className="text-slate-400">
-                  {currentDiagnostics?.instrument || 'AUDUSD'} · {currentDiagnostics?.broker || 'OANDA MT5'} · {currentDiagnostics?.timeframe || '5M'}
+                  {currentDiagnostics?.instrument || 'EURUSD'} · {currentDiagnostics?.broker || 'OANDA MT5'} · {currentDiagnostics?.timeframe || '5M'}
                 </span>
               </div>
 

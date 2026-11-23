@@ -27,11 +27,23 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { InstrumentId, LiveQuoteTick, CrtSignalResult, PositionDrawing } from '../types/trading';
+import {
+  InstrumentId,
+  LiveQuoteTick,
+  CrtSignalResult,
+  LockedTradeDecision,
+} from '../types/trading';
 import { SUPPORTED_INSTRUMENTS } from '../constants/instruments';
 import { MarketOrderTicketModal } from './MarketOrderTicketModal';
 import { tradeHistoryService } from '../services/tradeHistory';
 import { soundEffects } from '../services/soundEffects';
+import {
+  FIXED_SL_RR,
+  FIXED_TP_RR,
+  FIXED_RISK_REWARD,
+  FIXED_LOT_SIZE,
+  hasValidFixedSlTp,
+} from '../services/fixedRiskManagement';
 import {
   TrendingUp,
   TrendingDown,
@@ -56,10 +68,11 @@ import {
   CheckCircle2,
   RotateCcw,
   Sparkles,
-  Layers,
-  Flame,
-  Zap,
   ExternalLink,
+  Lock,
+  Unlock,
+  XCircle,
+  Hourglass,
 } from 'lucide-react';
 
 interface HomeScreenSignalCardProps {
@@ -70,6 +83,9 @@ interface HomeScreenSignalCardProps {
   broker: 'BINANCE' | 'OANDA';
   onToggleBroker: (broker: 'BINANCE' | 'OANDA') => void;
   signal: CrtSignalResult | null;
+  lockedDecision: LockedTradeDecision | null;
+  onCloseLockedDecision: () => void;
+  onResetFinishedLock: () => void;
   isSearching: boolean;
   onSearchSignal: () => void;
   onRefreshQuotes: () => void;
@@ -99,6 +115,9 @@ export const HomeScreenSignalCard: React.FC<HomeScreenSignalCardProps> = ({
   broker,
   onToggleBroker,
   signal,
+  lockedDecision,
+  onCloseLockedDecision,
+  onResetFinishedLock,
   isSearching,
   onSearchSignal,
   onRefreshQuotes,
@@ -189,55 +208,110 @@ export const HomeScreenSignalCard: React.FC<HomeScreenSignalCardProps> = ({
   };
 
   // =========================================================================
-  // AUTOMATIC SINGLE SIGNAL SELECTION LOGIC
-  // Evaluates strictly: BUY only, SELL only, or WAIT.
-  // Never asks user to choose. Never displays conflicting choices.
+  // FIXED AI TRADE DIRECTION LOCK + TWO-STAGE CONFIRMATION SELECTION
+  // 1. If a decision is LOCKED or ACTIVE, display ONLY that locked direction.
+  // 2. Never switch BUY <-> SELL while valid; keep Entry, SL, TP1/TP2/TP3 locked.
+  // 3. Before Stage 2 confirmation candle closes, keep decision in WAIT.
   // =========================================================================
-  const isConfirmedSignal = signal?.status === 'CONFIRMED_SIGNAL';
-  const rawVerdict = signal?.verdict || 'WAIT';
+  const isActivelyLocked =
+    lockedDecision !== null &&
+    (lockedDecision.lockStatus === 'LOCKED' || lockedDecision.lockStatus === 'ACTIVE');
 
-  // Only display BUY if bullish CRT conditions are fully confirmed
-  // Only display SELL if bearish CRT conditions are fully confirmed
-  // If neither or conflict: display WAIT
-  const singleDecision: 'BUY' | 'SELL' | 'WAIT' =
-    isConfirmedSignal && rawVerdict === 'BUY'
-      ? 'BUY'
-      : isConfirmedSignal && rawVerdict === 'SELL'
-      ? 'SELL'
-      : 'WAIT';
+  const isLockFinished =
+    lockedDecision !== null &&
+    (lockedDecision.lockStatus === 'INVALIDATED' || lockedDecision.lockStatus === 'CLOSED');
+
+  const singleDecision: 'BUY' | 'SELL' | 'WAIT' = isActivelyLocked
+    ? lockedDecision.direction
+    : 'WAIT';
 
   const isBuy = singleDecision === 'BUY';
   const isSell = singleDecision === 'SELL';
   const isWait = singleDecision === 'WAIT';
 
-  // Format Entry, SL, TP values
-  const hasValidSignal = isBuy || isSell;
-  const entryPriceFormatted = hasValidSignal && signal ? signal.entryPrice.toFixed(decimals) : '---';
-  const stopLossFormatted = hasValidSignal && signal ? signal.stopLoss.toFixed(decimals) : '---';
-  const tp1Formatted = hasValidSignal && signal ? signal.takeProfit1.toFixed(decimals) : '---';
-  const tp2Formatted = hasValidSignal && signal ? signal.takeProfit2.toFixed(decimals) : '---';
-  const tp3Formatted = hasValidSignal && signal ? signal.takeProfit3.toFixed(decimals) : '---';
+  const effectiveEntry = isActivelyLocked
+    ? lockedDecision.entryPrice
+    : isLockFinished
+    ? lockedDecision.entryPrice
+    : signal?.entryPrice || 0;
+  const effectiveSl = isActivelyLocked
+    ? lockedDecision.stopLoss
+    : isLockFinished
+    ? lockedDecision.stopLoss
+    : signal?.stopLoss || 0;
+  const effectiveTp1 = isActivelyLocked
+    ? (lockedDecision.takeProfit ?? lockedDecision.takeProfit1)
+    : isLockFinished
+    ? (lockedDecision.takeProfit ?? lockedDecision.takeProfit1)
+    : (signal?.takeProfit ?? signal?.takeProfit1 ?? 0);
+  const effectiveTp2 = effectiveTp1;
+  const effectiveTp3 = effectiveTp1;
 
-  // Confirmation Time
-  const confirmationTime = signal?.timestamp
+  const hasValidSignal =
+    (isBuy || isSell) &&
+    hasValidFixedSlTp(effectiveEntry, effectiveSl, effectiveTp1, isBuy ? 'BUY' : 'SELL');
+  const entryPriceFormatted = hasValidSignal ? effectiveEntry.toFixed(decimals) : '---';
+  const stopLossFormatted = hasValidSignal ? effectiveSl.toFixed(decimals) : '---';
+  const tp1Formatted = hasValidSignal ? effectiveTp1.toFixed(decimals) : '---';
+  const tp2Formatted = tp1Formatted;
+  const tp3Formatted = tp1Formatted;
+
+  // Two-stage status & Lock status badges
+  const twoStageStatus = isActivelyLocked
+    ? 'CONFIRMED'
+    : isLockFinished && lockedDecision.lockStatus === 'INVALIDATED'
+    ? 'INVALID'
+    : signal?.twoStageStatus || 'WAITING';
+
+  const displayLockStatus = lockedDecision?.lockStatus || 'UNLOCKED';
+
+  const isStage1Detected =
+    !isActivelyLocked &&
+    !isLockFinished &&
+    signal?.status === 'DETECTED_SETUP';
+
+  const isStageInvalid =
+    !isActivelyLocked &&
+    ((isLockFinished && lockedDecision.lockStatus === 'INVALIDATED') ||
+      signal?.status === 'INVALID_SETUP');
+
+  // Confirmation Time & Confirmation Candle Closing Time
+  const confirmationTime = isActivelyLocked
+    ? formatExactTime(lockedDecision.confirmedAt)
+    : isLockFinished
+    ? formatExactTime(lockedDecision.confirmedAt)
+    : signal?.timestamp
     ? formatExactTime(signal.timestamp)
     : formatExactTime(Date.now());
 
+  const confirmationCandleCloseFormatted = isActivelyLocked
+    ? formatExactTime(lockedDecision.confirmationCandleCloseTime)
+    : isLockFinished
+    ? formatExactTime(lockedDecision.confirmationCandleCloseTime)
+    : signal?.confirmationCandleCloseTime
+    ? formatExactTime(signal.confirmationCandleCloseTime)
+    : '---';
+
   // Reason for selecting that direction
   let selectionReason = '';
-  if (isBuy) {
+  if (isBuy || isSell) {
     selectionReason =
+      lockedDecision?.reason ||
+      signal?.confirmationReason ||
       signal?.summaryMessage ||
-      'Bullish CRT conditions fully confirmed: Monthly Bullish expansion aligned with Weekly Key Level mitigation, 1H Liquidity Purge of sell-side liquidity, and 5M SMT Model 1 upward displacement.';
-  } else if (isSell) {
+      'Stage 2 closed 5M confirmation candle verified full CRT alignment.';
+  } else if (isLockFinished && lockedDecision) {
+    selectionReason = lockedDecision.statusNote;
+  } else if (isStage1Detected) {
     selectionReason =
+      signal?.confirmationReason ||
       signal?.summaryMessage ||
-      'Bearish CRT conditions fully confirmed: Monthly Bearish expansion aligned with Weekly Key Level mitigation, 1H Liquidity Purge of buy-side liquidity, and 5M SMT Model 1 downward displacement.';
+      'WAITING FOR MARKET CONFIRMATION: Stage 1 CRT setup detected through 1H; waiting for the 5M confirmation candle to close before publishing BUY or SELL.';
   } else {
-    // WAIT Reason
     selectionReason =
+      signal?.confirmationReason ||
       signal?.summaryMessage ||
-      'Awaiting 1H Key Level Purge or Turtle Soup sweep and 5M SMT Model 1 displacement. Conditions are not yet fully aligned. The engine does not guess or force trades.';
+      'Awaiting full CRT confluence across Monthly, Weekly KL, 1H Purge/TS, and closed 5M SMT Model 1 candle.';
   }
 
   // =========================================================================
@@ -257,7 +331,7 @@ export const HomeScreenSignalCard: React.FC<HomeScreenSignalCardProps> = ({
 
     floatingPips = Number((rawDiff / pipSize).toFixed(1));
     const pipValPerLot = selectedInstrument === 'NASDAQ' ? 1 : 10;
-    floatingUsd = Number((floatingPips * pipValPerLot * (activeTrade.lotSize || 1.0)).toFixed(2));
+    floatingUsd = Number((floatingPips * pipValPerLot * (activeTrade.lotSize || FIXED_LOT_SIZE)).toFixed(2));
 
     distanceToTp1 = Number((Math.abs(activeTrade.takeProfit1 - currentPriceForPnl) / pipSize).toFixed(1));
     distanceToSl = Number((Math.abs(currentPriceForPnl - activeTrade.stopLoss) / pipSize).toFixed(1));
@@ -279,13 +353,13 @@ export const HomeScreenSignalCard: React.FC<HomeScreenSignalCardProps> = ({
     setTimeout(() => setOrderSuccessMessage(null), 6000);
   };
 
-  // Open the Market Order Ticket Modal for the single confirmed direction
+  // Open the Market Order Ticket Modal for the single confirmed direction (requires valid SL & TP)
   const handleOpenConfirmedOrderModal = () => {
     if (!hasValidSignal) return;
     setIsOrderModalOpen(true);
   };
 
-  // Order Executed callback from modal
+  // Order Executed callback from modal — STRICT GUARD: Never open without SL & TP
   const handleOrderExecuted = (order: {
     direction: 'BUY' | 'SELL';
     entryPrice: number;
@@ -300,6 +374,10 @@ export const HomeScreenSignalCard: React.FC<HomeScreenSignalCardProps> = ({
     pipsRisk: number;
     pipsReward: number;
   }) => {
+    if (!hasValidFixedSlTp(order.entryPrice, order.stopLoss, order.takeProfit1, order.direction)) {
+      return;
+    }
+
     // 1. Log to Trade History as IN_PROGRESS
     const tradeItem = tradeHistoryService.addFromSignal({
       instrument: selectedInstrument,
@@ -309,12 +387,16 @@ export const HomeScreenSignalCard: React.FC<HomeScreenSignalCardProps> = ({
       timestamp: Date.now(),
       entryPrice: order.entryPrice,
       stopLoss: order.stopLoss,
+      takeProfit: order.takeProfit1,
       takeProfit1: order.takeProfit1,
-      takeProfit2: order.takeProfit2,
-      takeProfit3: order.takeProfit3,
-      riskReward1: 2,
-      riskReward2: 3,
-      riskReward3: 5,
+      takeProfit2: order.takeProfit1,
+      takeProfit3: order.takeProfit1,
+      slRR: FIXED_SL_RR,
+      tpRR: FIXED_TP_RR,
+      lotSize: FIXED_LOT_SIZE,
+      riskReward1: FIXED_RISK_REWARD,
+      riskReward2: FIXED_RISK_REWARD,
+      riskReward3: FIXED_RISK_REWARD,
       pipsRisk: order.pipsRisk,
       pipsReward1: order.pipsReward,
       monthlyDirection: signal?.monthlyDirection || 'BULLISH',
@@ -367,20 +449,21 @@ export const HomeScreenSignalCard: React.FC<HomeScreenSignalCardProps> = ({
   };
 
   const handleCopySetup = () => {
-    if (!signal) return;
-    const text = `MUSCAB CRT PRO - ${signal.instrument} SIGNAL
-Decision: ${singleDecision}
+    const baseSignal = isActivelyLocked && lockedDecision ? lockedDecision.originalSignal : signal;
+    if (!baseSignal) return;
+    const text = `MUSCAB CRT PRO - ${baseSignal.instrument} SIGNAL
+Decision: ${singleDecision} (Status: ${displayLockStatus} / Stage: ${twoStageStatus})
 Confirmation Time: ${confirmationTime}
+Confirmation Candle Close: ${confirmationCandleCloseFormatted}
 Reason: ${selectionReason}
 Live Market Mid: ${currentMid.toFixed(decimals)}
 Live Bid: ${currentBid.toFixed(decimals)}
 Live Ask: ${currentAsk.toFixed(decimals)}
+Lot Size: ${FIXED_LOT_SIZE}.00 Standard Lot
 Entry Price: ${entryPriceFormatted}
-Stop Loss: ${stopLossFormatted} (Risk: ${signal.pipsRisk} pips)
-TP1 (1:${signal.riskReward1}): ${tp1Formatted} (+${signal.pipsReward1} pips)
-TP2 (1:${signal.riskReward2}): ${tp2Formatted}
-TP3 (1:${signal.riskReward3}): ${tp3Formatted}
-Target Pool: ${signal.targetLiquidityName} (${signal.targetLiquidityPrice.toFixed(decimals)})
+Stop Loss (${FIXED_SL_RR}RR Fixed): ${stopLossFormatted} (-${lockedDecision?.pipsRisk ?? baseSignal.pipsRisk} pips)
+Take Profit (${FIXED_TP_RR}RR Target · 1:${FIXED_RISK_REWARD}): ${tp1Formatted} (+${lockedDecision?.pipsReward1 ?? baseSignal.pipsReward1} pips)
+Target Pool: ${lockedDecision?.targetLiquidityName ?? baseSignal.targetLiquidityName} (${(lockedDecision?.targetLiquidityPrice ?? baseSignal.targetLiquidityPrice).toFixed(decimals)})
 Broker: ${broker}`;
 
     navigator.clipboard.writeText(text);
@@ -389,11 +472,11 @@ Broker: ${broker}`;
   };
 
   const handleLogTradeClick = () => {
-    if (signal && onLogTrade) {
-      onLogTrade(signal);
-      setLogged(true);
-      setTimeout(() => setLogged(false), 2500);
-    }
+    const baseSignal = isActivelyLocked && lockedDecision ? lockedDecision.originalSignal : signal;
+    if (!baseSignal || !onLogTrade || !hasValidSignal) return;
+    onLogTrade(baseSignal);
+    setLogged(true);
+    setTimeout(() => setLogged(false), 2500);
   };
 
   return (
@@ -402,24 +485,24 @@ Broker: ${broker}`;
           TOP BAR: Quick Market Tabs, Connection Status & Broker Feed
           ========================================================================= */}
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 border-b border-neutral-800/80 bg-black/60 text-xs font-mono">
-        {/* Left: Quick Switcher (AUD/USD is default primary) */}
+        {/* Left: Quick Switcher (EUR/USD is default primary) */}
         <div className="flex items-center gap-2">
           <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider hidden sm:inline">
             Active Market:
           </span>
           <div className="flex items-center bg-[#10121a] border border-neutral-800 rounded-xl p-1">
             <button
-              onClick={() => onSelectInstrument('AUDUSD')}
+              onClick={() => onSelectInstrument('EURUSD')}
               className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all flex items-center gap-1.5 ${
-                selectedInstrument === 'AUDUSD'
+                selectedInstrument === 'EURUSD'
                   ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-500/20 ring-1 ring-amber-300'
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              <span>AUD/USD</span>
+              <span>EUR/USD</span>
               <span
                 className={`text-[9px] px-1 py-0.2 rounded font-bold ${
-                  selectedInstrument === 'AUDUSD' ? 'bg-black/30 text-slate-950' : 'bg-neutral-800 text-slate-400'
+                  selectedInstrument === 'EURUSD' ? 'bg-black/30 text-slate-950' : 'bg-neutral-800 text-slate-400'
                 }`}
               >
                 FOREX
@@ -509,8 +592,8 @@ Broker: ${broker}`;
           {/* Direct TradingView Link */}
           <a
             href={`https://www.tradingview.com/chart/?symbol=${
-              selectedInstrument === 'AUDUSD'
-                ? 'OANDA%3AAUDUSD'
+              selectedInstrument === 'EURUSD'
+                ? 'OANDA%3AEURUSD'
                 : selectedInstrument === 'XAUUSD'
                 ? 'OANDA%3AXAUUSD'
                 : 'NASDAQ%3ANDX'
@@ -553,7 +636,7 @@ Broker: ${broker}`;
       )}
 
       {/* =========================================================================
-          SECTION 1: ACTUAL AUD/USD LIVE MARKET PRICE DISPLAY
+          SECTION 1: ACTUAL EUR/USD LIVE MARKET PRICE DISPLAY
           ========================================================================= */}
       <div className="p-6 lg:p-8 space-y-6">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-neutral-800/80">
@@ -561,8 +644,8 @@ Broker: ${broker}`;
           <div className="flex flex-col space-y-3">
             <div className="flex items-center gap-2">
               <span className="px-2.5 py-1 rounded bg-amber-500/15 border border-amber-500/40 text-amber-400 text-xs font-mono font-bold tracking-wider uppercase">
-                {selectedInstrument === 'AUDUSD'
-                  ? 'AUD/USD SPOT FOREX'
+                {selectedInstrument === 'EURUSD'
+                  ? 'EUR/USD SPOT FOREX'
                   : selectedInstrument === 'XAUUSD'
                   ? 'XAU/USD GOLD SPOT'
                   : 'NASDAQ 100 INDEX'}
@@ -601,7 +684,7 @@ Broker: ${broker}`;
                     </span>
                   )}
                   <span className="text-slate-400 text-[11px] font-sans">
-                    {selectedInstrument === 'AUDUSD' ? 'USD per AUD' : selectedInstrument === 'XAUUSD' ? 'USD/oz' : 'Points'}
+                    {selectedInstrument === 'EURUSD' ? 'USD per EUR' : selectedInstrument === 'XAUUSD' ? 'USD/oz' : 'Points'}
                   </span>
                 </div>
               </div>
@@ -759,192 +842,433 @@ Broker: ${broker}`;
             {/* PROGRESS & LEVEL METRICS */}
             <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
               <div className="p-2 rounded-lg bg-black/40 border border-neutral-800">
-                <span className="text-[10px] text-slate-500 block uppercase">Distance to TP1</span>
+                <span className="text-[10px] text-slate-500 block uppercase">Distance to TP ({FIXED_TP_RR}RR)</span>
                 <span className="font-bold text-emerald-400">{distanceToTp1} Pips Remaining</span>
               </div>
               <div className="p-2 rounded-lg bg-black/40 border border-neutral-800">
-                <span className="text-[10px] text-slate-500 block uppercase">Stop Loss Buffer</span>
+                <span className="text-[10px] text-slate-500 block uppercase">SL Buffer ({FIXED_SL_RR}RR)</span>
                 <span className="font-bold text-rose-300">{distanceToSl} Pips Buffer</span>
               </div>
               <div className="p-2 rounded-lg bg-black/40 border border-neutral-800">
-                <span className="text-[10px] text-slate-500 block uppercase">Take Profit Target</span>
-                <span className="font-bold text-white">{activeTrade.takeProfit1.toFixed(decimals)}</span>
+                <span className="text-[10px] text-slate-500 block uppercase">Take Profit ({FIXED_TP_RR}RR · 1:{FIXED_RISK_REWARD})</span>
+                <span className="font-bold text-emerald-300">{activeTrade.takeProfit1.toFixed(decimals)}</span>
               </div>
               <div className="p-2 rounded-lg bg-black/40 border border-neutral-800">
-                <span className="text-[10px] text-slate-500 block uppercase">Protection Stop Loss</span>
-                <span className="font-bold text-white">{activeTrade.stopLoss.toFixed(decimals)}</span>
+                <span className="text-[10px] text-slate-500 block uppercase">Stop Loss ({FIXED_SL_RR}RR Fixed)</span>
+                <span className="font-bold text-rose-300">{activeTrade.stopLoss.toFixed(decimals)}</span>
               </div>
             </div>
           </div>
         )}
 
         {/* =========================================================================
-            SECTION 2: AUTOMATIC SINGLE TRADING DECISION (BUY OR SELL OR WAIT)
-            NEVER displays competing choices. NEVER asks user to choose.
+            PERMANENT MARKET DIRECTION LOGO + TWO-STAGE PIPELINE & DECISION LOCK
+            NEVER displays competing choices. Locks BUY or SELL until CLOSED/INVALIDATED.
             ========================================================================= */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs uppercase font-mono tracking-widest text-slate-400 font-bold flex items-center gap-2">
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>AUTOMATIC CRT STRATEGY DECISION</span>
-              <span className="text-neutral-600">·</span>
-              <span className="text-amber-400/90 font-normal">Engine Automatically Selects Single Valid Direction</span>
-            </span>
-            <span className="text-[11px] font-mono text-slate-400">
-              Rule Compliance: Single Active Signal Only
-            </span>
+        <div className="space-y-4">
+          {/* Header Strip: Permanent Market Logo + Two-Stage & Lock Badges */}
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-2xl bg-black/70 border border-neutral-800">
+            {/* PERMANENT MARKET DIRECTION LOGO INDICATOR */}
+            <div className="flex items-center gap-4">
+              <div
+                className={`relative w-20 h-20 rounded-2xl flex flex-col items-center justify-center shrink-0 border-2 shadow-2xl transition-all duration-300 ${
+                  isBuy
+                    ? 'bg-gradient-to-br from-emerald-500 to-emerald-700 border-emerald-300 text-slate-950 shadow-[0_0_30px_rgba(16,185,129,0.45)]'
+                    : isSell
+                    ? 'bg-gradient-to-br from-rose-500 to-rose-700 border-rose-300 text-white shadow-[0_0_30px_rgba(239,68,68,0.45)]'
+                    : 'bg-gradient-to-br from-amber-400 to-amber-600 border-amber-200 text-slate-950 shadow-[0_0_25px_rgba(245,158,11,0.35)]'
+                }`}
+                aria-label={`Permanent Market Direction Logo: ${singleDecision}`}
+              >
+                {isBuy ? (
+                  <TrendingUp className="w-8 h-8 stroke-[3]" />
+                ) : isSell ? (
+                  <TrendingDown className="w-8 h-8 stroke-[3]" />
+                ) : (
+                  <PauseCircle className="w-8 h-8 stroke-[2.75]" />
+                )}
+                <span className="text-xs font-black font-mono tracking-widest mt-0.5 uppercase">
+                  {singleDecision}
+                </span>
+                {isActivelyLocked && (
+                  <span
+                    className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-black border border-amber-400 flex items-center justify-center text-amber-400 shadow-md"
+                    title="AI Direction Locked"
+                  >
+                    <Lock className="w-3 h-3" />
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] uppercase font-mono tracking-widest text-slate-400 font-bold">
+                    PERMANENT AI MARKET DIRECTION LOGO
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-black uppercase border ${
+                      displayLockStatus === 'ACTIVE'
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
+                        : displayLockStatus === 'LOCKED'
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+                        : displayLockStatus === 'INVALIDATED'
+                        ? 'bg-rose-500/20 text-rose-300 border-rose-500/50'
+                        : displayLockStatus === 'CLOSED'
+                        ? 'bg-slate-700/60 text-slate-200 border-slate-500/50'
+                        : 'bg-neutral-900 text-slate-400 border-neutral-700'
+                    }`}
+                  >
+                    LOCK STATUS: {displayLockStatus}
+                  </span>
+                </div>
+
+                <div className="text-base sm:text-lg font-extrabold text-white flex flex-wrap items-center gap-2">
+                  {isBuy ? (
+                    <span className="text-emerald-400">
+                      GREEN BUY LOCKED — {selectedInstrument}
+                    </span>
+                  ) : isSell ? (
+                    <span className="text-rose-400">
+                      RED SELL LOCKED — {selectedInstrument}
+                    </span>
+                  ) : isStage1Detected ? (
+                    <span className="text-amber-400">
+                      GOLD WAIT — WAITING FOR MARKET CONFIRMATION
+                    </span>
+                  ) : isLockFinished && lockedDecision ? (
+                    <span className="text-amber-400">
+                      GOLD WAIT — PREVIOUS {lockedDecision.direction} {lockedDecision.lockStatus}
+                    </span>
+                  ) : (
+                    <span className="text-amber-400">
+                      GOLD WAIT — NO CONFIRMED CRT SETUP
+                    </span>
+                  )}
+                </div>
+
+                <div className="text-[11px] font-mono text-slate-400 flex flex-wrap items-center gap-2">
+                  <span>
+                    Two-Stage Status:{' '}
+                    <strong
+                      className={
+                        twoStageStatus === 'CONFIRMED'
+                          ? 'text-emerald-400'
+                          : twoStageStatus === 'INVALID'
+                          ? 'text-rose-400'
+                          : 'text-amber-400'
+                      }
+                    >
+                      {twoStageStatus}
+                    </strong>
+                  </span>
+                  <span>·</span>
+                  <span>
+                    Stage 1:{' '}
+                    <strong className="text-slate-200">
+                      {isActivelyLocked || isStage1Detected ? 'DETECTED' : 'SCANNING'}
+                    </strong>
+                  </span>
+                  <span>·</span>
+                  <span>
+                    Stage 2:{' '}
+                    <strong className="text-slate-200">
+                      {isActivelyLocked
+                        ? 'CONFIRMED (CANDLE CLOSED)'
+                        : isStageInvalid
+                        ? 'INVALID / REJECTED'
+                        : 'AWAITING 5M CLOSE'}
+                    </strong>
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Right: Two-Stage Indicator Pill & Lock Controls */}
+            <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
+              {isActivelyLocked && (
+                <button
+                  onClick={onCloseLockedDecision}
+                  className="px-3.5 py-2 rounded-xl bg-neutral-900 hover:bg-rose-950/70 border border-neutral-700 hover:border-rose-500/60 text-slate-200 hover:text-rose-200 font-bold transition-all flex items-center gap-1.5"
+                  title="Manually close the locked setup and unlock for a brand new CRT setup"
+                >
+                  <Unlock className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Close / Unlock Setup</span>
+                </button>
+              )}
+
+              {isLockFinished && (
+                <button
+                  onClick={onResetFinishedLock}
+                  className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black transition-all flex items-center gap-1.5 shadow-md"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                  <span>Scan New CRT Setup</span>
+                </button>
+              )}
+            </div>
           </div>
 
           {/* -------------------------------------------------------------------
-              CASE 1: BUY DECISION ONLY (BULLISH CRT FULLY CONFIRMED)
+              CASE 1 & CASE 2: LOCKED / ACTIVE BUY OR SELL DECISION
               ------------------------------------------------------------------- */}
-          {isBuy && (
-            <div className="w-full rounded-2xl p-6 sm:p-7 border border-emerald-400 bg-gradient-to-br from-emerald-950/80 via-emerald-900/30 to-[#070e0a] shadow-[0_0_45px_rgba(16,185,129,0.3)] ring-2 ring-emerald-400/40 space-y-6 animate-in fade-in duration-300">
+          {(isBuy || isSell) && (
+            <div
+              className={`w-full rounded-2xl p-6 sm:p-7 border space-y-6 animate-in fade-in duration-300 ${
+                isBuy
+                  ? 'border-emerald-400 bg-gradient-to-br from-emerald-950/80 via-emerald-900/30 to-[#070e0a] shadow-[0_0_45px_rgba(16,185,129,0.28)] ring-2 ring-emerald-400/40'
+                  : 'border-rose-400 bg-gradient-to-br from-rose-950/80 via-rose-900/30 to-[#120709] shadow-[0_0_45px_rgba(239,68,68,0.28)] ring-2 ring-rose-400/40'
+              }`}
+            >
               {/* Decision Header */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-emerald-500/30">
+              <div
+                className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b ${
+                  isBuy ? 'border-emerald-500/30' : 'border-rose-500/30'
+                }`}
+              >
                 <div className="flex items-center gap-3.5">
-                  <div className="w-14 h-14 rounded-2xl bg-white text-emerald-800 flex items-center justify-center shrink-0 shadow-xl shadow-emerald-500/20">
-                    <TrendingUp className="w-8 h-8 stroke-[3]" />
+                  <div
+                    className={`w-14 h-14 rounded-2xl bg-white flex items-center justify-center shrink-0 shadow-xl ${
+                      isBuy ? 'text-emerald-800 shadow-emerald-500/20' : 'text-rose-800 shadow-rose-500/20'
+                    }`}
+                  >
+                    {isBuy ? (
+                      <TrendingUp className="w-8 h-8 stroke-[3]" />
+                    ) : (
+                      <TrendingDown className="w-8 h-8 stroke-[3]" />
+                    )}
                   </div>
                   <div>
-                    <div className="flex items-center gap-2.5">
+                    <div className="flex flex-wrap items-center gap-2.5">
                       <span className="text-3xl sm:text-4xl font-black font-mono text-white tracking-tight uppercase">
-                        BUY
+                        {singleDecision}
                       </span>
-                      <span className="px-3 py-1 rounded-full bg-white text-emerald-900 text-xs font-black uppercase font-mono shadow-md animate-pulse">
-                        CONFIRMED SIGNAL
+                      <span
+                        className={`px-3 py-1 rounded-full bg-white text-xs font-black uppercase font-mono shadow-md flex items-center gap-1 ${
+                          isBuy ? 'text-emerald-900' : 'text-rose-900'
+                        }`}
+                      >
+                        <Lock className="w-3 h-3" />
+                        <span>{displayLockStatus} · STAGE 2 CONFIRMED</span>
                       </span>
                     </div>
-                    <div className="text-xs font-mono text-emerald-200/90 mt-1 flex items-center gap-2">
-                      <span className="font-bold">BULLISH CRT EXPANSION VALIDATED</span>
+                    <div
+                      className={`text-xs font-mono mt-1.5 flex flex-wrap items-center gap-2 ${
+                        isBuy ? 'text-emerald-200/90' : 'text-rose-200/90'
+                      }`}
+                    >
+                      <span>
+                        Confirmed: <strong className="text-white">{confirmationTime}</strong>
+                      </span>
                       <span>·</span>
-                      <span>Confirmation Time: <strong className="text-white">{confirmationTime}</strong></span>
+                      <span>
+                        5M Candle Closed: <strong className="text-amber-300">{confirmationCandleCloseFormatted}</strong>
+                      </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Primary Action Button */}
+                {/* Primary Manual Order Ticket Button (Analysis Signal Only — Never Auto-Executes) */}
                 <div className="flex items-center gap-2">
                   <button
                     onClick={handleOpenConfirmedOrderModal}
-                    className="py-3 px-6 rounded-xl font-mono font-black text-sm uppercase tracking-wider bg-white hover:bg-emerald-100 text-emerald-950 shadow-lg shadow-emerald-500/30 transition-all active:scale-95 flex items-center gap-2"
+                    className={`py-3 px-5 rounded-xl font-mono font-black text-xs sm:text-sm uppercase tracking-wider bg-white shadow-lg transition-all active:scale-95 flex items-center gap-2 ${
+                      isBuy
+                        ? 'hover:bg-emerald-100 text-emerald-950 shadow-emerald-500/30'
+                        : 'hover:bg-rose-100 text-rose-950 shadow-rose-500/30'
+                    }`}
                   >
-                    <TrendingUp className="w-4 h-4 stroke-[3]" />
-                    <span>CONNECT & EXECUTE BUY @ {currentAsk.toFixed(decimals)}</span>
+                    {isBuy ? (
+                      <TrendingUp className="w-4 h-4 stroke-[3]" />
+                    ) : (
+                      <TrendingDown className="w-4 h-4 stroke-[3]" />
+                    )}
+                    <span>
+                      CONNECT {singleDecision} TICKET @ {(isBuy ? currentAsk : currentBid).toFixed(decimals)}
+                    </span>
                   </button>
                 </div>
               </div>
 
-              {/* Reason for Selecting BUY */}
-              <div className="p-4 rounded-xl bg-black/50 border border-emerald-500/30 space-y-2">
-                <div className="flex items-center gap-2 text-xs font-mono font-bold text-emerald-300 uppercase">
-                  <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>Reason for Selecting BUY:</span>
+              {/* Live Locked Trade Progress Bar & Fixed 1RR SL / 3RR TP / Lot 1 Tracker */}
+              {lockedDecision && (
+                <div className="p-4 rounded-xl bg-black/60 border border-amber-500/30 space-y-3 font-mono text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-amber-300 font-bold">
+                      <Lock className="w-3.5 h-3.5" />
+                      <span>FIXED RISK TRACKER ({FIXED_SL_RR}RR SL / {FIXED_TP_RR}RR TP · {FIXED_LOT_SIZE}.00 LOT LOCKED)</span>
+                    </div>
+                    <div
+                      className={`text-sm font-black tabular-nums ${
+                        lockedDecision.floatingPips >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                      }`}
+                    >
+                      {lockedDecision.floatingPips >= 0
+                        ? `+${lockedDecision.floatingPips}`
+                        : lockedDecision.floatingPips}{' '}
+                      Pips Live
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                    <div
+                      className={`p-2.5 rounded-lg border flex items-center justify-between ${
+                        lockedDecision.slHit
+                          ? 'bg-rose-500/20 border-rose-400 text-rose-200'
+                          : 'bg-neutral-900/70 border-neutral-800 text-slate-300'
+                      }`}
+                    >
+                      <span>Stop Loss ({FIXED_SL_RR}RR Fixed)</span>
+                      <strong className={lockedDecision.slHit ? 'text-rose-300' : 'text-emerald-300'}>
+                        {lockedDecision.slHit ? 'HIT' : 'PROTECTED'}
+                      </strong>
+                    </div>
+                    <div
+                      className={`p-2.5 rounded-lg border flex items-center justify-between ${
+                        lockedDecision.tp1Hit
+                          ? 'bg-emerald-500/20 border-emerald-400 text-emerald-200'
+                          : 'bg-neutral-900/70 border-neutral-800 text-slate-300'
+                      }`}
+                    >
+                      <span>Take Profit ({FIXED_TP_RR}RR Target)</span>
+                      <strong className={lockedDecision.tp1Hit ? 'text-emerald-300' : 'text-amber-300'}>
+                        {lockedDecision.tp1Hit ? 'HIT' : 'OPEN'}
+                      </strong>
+                    </div>
+                    <div className="p-2.5 rounded-lg border bg-neutral-900/70 border-neutral-800 text-slate-300 flex items-center justify-between">
+                      <span>Peak Favorable</span>
+                      <strong className="text-amber-300">+{lockedDecision.highestFavorablePips} Pips</strong>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* AI Transparency: Reason for Selecting Direction */}
+              <div
+                className={`p-4 rounded-xl bg-black/50 border space-y-2 ${
+                  isBuy ? 'border-emerald-500/30' : 'border-rose-500/30'
+                }`}
+              >
+                <div
+                  className={`flex items-center gap-2 text-xs font-mono font-bold uppercase ${
+                    isBuy ? 'text-emerald-300' : 'text-rose-300'
+                  }`}
+                >
+                  <ShieldCheck className={`w-4 h-4 shrink-0 ${isBuy ? 'text-emerald-400' : 'text-rose-400'}`} />
+                  <span>Why AI Selected {singleDecision} (CRT Verification):</span>
                 </div>
                 <p className="text-xs text-slate-200 font-sans leading-relaxed">
                   {selectionReason}
                 </p>
-                <div className="pt-2 border-t border-emerald-500/20 flex flex-wrap items-center gap-3 text-[11px] font-mono text-emerald-300/80">
+                <div
+                  className={`pt-2 border-t flex flex-wrap items-center gap-3 text-[11px] font-mono ${
+                    isBuy ? 'border-emerald-500/20 text-emerald-300/80' : 'border-rose-500/20 text-rose-300/80'
+                  }`}
+                >
                   <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    Monthly Bullish Expansion
+                    <CheckCircle2 className={`w-3.5 h-3.5 ${isBuy ? 'text-emerald-400' : 'text-rose-400'}`} />
+                    Monthly {isBuy ? 'Bullish' : 'Bearish'} Expansion
                   </span>
                   <span>·</span>
                   <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <CheckCircle2 className={`w-3.5 h-3.5 ${isBuy ? 'text-emerald-400' : 'text-rose-400'}`} />
                     Weekly KL Mitigation
                   </span>
                   <span>·</span>
                   <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    1H Purge Completed
+                    <CheckCircle2 className={`w-3.5 h-3.5 ${isBuy ? 'text-emerald-400' : 'text-rose-400'}`} />
+                    1H Purge Confirmed
                   </span>
                   <span>·</span>
                   <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    5M SMT Model 1 Trigger
+                    <CheckCircle2 className={`w-3.5 h-3.5 ${isBuy ? 'text-emerald-400' : 'text-rose-400'}`} />
+                    Closed 5M SMT Model 1
                   </span>
                 </div>
               </div>
 
-              {/* Exact Setup Parameters Grid: Entry, SL, TP1, TP2, TP3 */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 font-mono">
-                {/* BUY ENTRY PRICE */}
-                <div className="p-4 rounded-xl bg-black/60 border border-emerald-500/40 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-emerald-300 font-bold">
-                    BUY Entry Price
-                  </span>
-                  <div className="my-1 text-2xl font-black text-white tabular-nums">
+              {/* Exact Locked Setup Parameters Grid: Entry Price, Stop Loss (1RR Fixed), Take Profit (3RR Fixed) · Lot 1 */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 font-mono">
+                <div
+                  className={`p-4 rounded-xl bg-black/60 border flex flex-col justify-between ${
+                    isBuy ? 'border-emerald-500/40' : 'border-rose-500/40'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span
+                      className={`text-[11px] uppercase tracking-wider font-bold ${
+                        isBuy ? 'text-emerald-300' : 'text-rose-300'
+                      }`}
+                    >
+                      {singleDecision} Entry Price
+                    </span>
+                    <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                      {FIXED_LOT_SIZE}.00 LOT
+                    </span>
+                  </div>
+                  <div className="my-1.5 text-2xl sm:text-3xl font-black text-white tabular-nums">
                     {entryPriceFormatted}
                   </div>
-                  <span className="text-[10px] text-emerald-200/70">Institutional Trigger</span>
+                  <span className="text-[10px] text-slate-400">Actual Confirmed Entry (Lot {FIXED_LOT_SIZE})</span>
                 </div>
 
-                {/* STOP LOSS */}
-                <div className="p-4 rounded-xl bg-rose-950/30 border border-rose-500/40 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-rose-400 font-bold">
-                    Stop Loss (SL)
-                  </span>
-                  <div className="my-1 text-2xl font-black text-rose-300 tabular-nums">
+                <div className="p-4 rounded-xl bg-rose-950/30 border border-rose-500/45 flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] uppercase tracking-wider text-rose-400 font-bold">
+                      Stop Loss (SL)
+                    </span>
+                    <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                      {FIXED_SL_RR}RR FIXED
+                    </span>
+                  </div>
+                  <div className="my-1.5 text-2xl sm:text-3xl font-black text-rose-300 tabular-nums">
                     {stopLossFormatted}
                   </div>
-                  <span className="text-[10px] text-rose-400/80">Risk: {signal?.pipsRisk} Pips</span>
+                  <span className="text-[10px] text-rose-400/80">
+                    1RR Risk: -{lockedDecision?.pipsRisk ?? signal?.pipsRisk} Pips
+                  </span>
                 </div>
 
-                {/* TP1 */}
-                <div className="p-4 rounded-xl bg-emerald-950/30 border border-emerald-500/40 flex flex-col justify-between">
+                <div
+                  className={`p-4 rounded-xl border flex flex-col justify-between ${
+                    isBuy ? 'bg-emerald-950/35 border-emerald-500/50' : 'bg-emerald-950/30 border-emerald-500/45'
+                  }`}
+                >
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] uppercase tracking-wider text-emerald-400 font-bold">
-                      TP1 (1:2)
+                    <span className="text-[11px] uppercase tracking-wider font-bold text-emerald-400 flex items-center gap-1">
+                      <Target className="w-3.5 h-3.5" /> Take Profit (TP)
                     </span>
-                    <span className="text-[10px] text-emerald-300 bg-emerald-500/20 px-1 rounded font-bold">
-                      +{signal?.pipsReward1} Pips
+                    <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      {FIXED_TP_RR}RR · 1:{FIXED_RISK_REWARD}
                     </span>
                   </div>
-                  <div className="my-1 text-2xl font-black text-emerald-300 tabular-nums">
+                  <div className="my-1.5 text-2xl sm:text-3xl font-black tabular-nums text-emerald-300">
                     {tp1Formatted}
                   </div>
-                  <span className="text-[10px] text-emerald-400/80">Initial Target</span>
-                </div>
-
-                {/* TP2 */}
-                <div className="p-4 rounded-xl bg-emerald-950/40 border border-emerald-500/50 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-emerald-400 font-bold">
-                    TP2 (1:3)
+                  <span className="text-[10px] text-emerald-300/80">
+                    3RR Target: +{lockedDecision?.pipsReward1 ?? signal?.pipsReward1} Pips
                   </span>
-                  <div className="my-1 text-2xl font-black text-emerald-300 tabular-nums">
-                    {tp2Formatted}
-                  </div>
-                  <span className="text-[10px] text-emerald-400/80">Weekly Key Level</span>
-                </div>
-
-                {/* TP3 */}
-                <div className="col-span-2 sm:col-span-1 p-4 rounded-xl bg-amber-950/30 border border-amber-500/40 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-amber-400 font-bold flex items-center gap-1">
-                    <Target className="w-3.5 h-3.5" /> TP3 (1:5)
-                  </span>
-                  <div className="my-1 text-2xl font-black text-amber-300 tabular-nums">
-                    {tp3Formatted}
-                  </div>
-                  <span className="text-[10px] text-amber-400/80 truncate">Macro Pool Target</span>
                 </div>
               </div>
 
-              {/* Action Toolbar */}
+              {/* Action Toolbar & Probability Disclaimer */}
               <div className="pt-2 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
                 <div className="flex items-center gap-2">
                   <button
                     onClick={handleCopySetup}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/60 hover:bg-neutral-900 border border-emerald-500/30 text-emerald-200 transition-colors"
+                    className={`flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/60 hover:bg-neutral-900 border transition-colors ${
+                      isBuy ? 'border-emerald-500/30 text-emerald-200' : 'border-rose-500/30 text-rose-200'
+                    }`}
                   >
                     {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                     <span>{copied ? 'Copied' : 'Copy Setup'}</span>
                   </button>
 
-                  {onLogTrade && (
+                  {onLogTrade && signal && (
                     <button
                       onClick={handleLogTradeClick}
-                      className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/60 hover:bg-neutral-900 border border-emerald-500/30 text-emerald-200 transition-colors"
+                      className={`flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/60 hover:bg-neutral-900 border transition-colors ${
+                        isBuy ? 'border-emerald-500/30 text-emerald-200' : 'border-rose-500/30 text-rose-200'
+                      }`}
                     >
                       {logged ? <Check className="w-3.5 h-3.5 text-amber-400" /> : <BookmarkPlus className="w-3.5 h-3.5" />}
                       <span>{logged ? 'Logged' : 'Log Trade'}</span>
@@ -952,179 +1276,26 @@ Broker: ${broker}`;
                   )}
                 </div>
 
-                <div className="text-[11px] text-emerald-300/80">
-                  Target Pool: <strong className="text-white">{signal?.targetLiquidityName} ({signal?.targetLiquidityPrice.toFixed(decimals)})</strong>
+                <div className="text-[11px] text-slate-300">
+                  Target Pool:{' '}
+                  <strong className="text-white">
+                    {lockedDecision?.targetLiquidityName || signal?.targetLiquidityName} (
+                    {(lockedDecision?.targetLiquidityPrice || signal?.targetLiquidityPrice || 0).toFixed(decimals)})
+                  </strong>
                 </div>
+              </div>
+
+              <div className="text-[11px] font-mono text-slate-400 pt-2 border-t border-neutral-800/70 flex items-center gap-2">
+                <Info className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>
+                  Transparency Notice: Probabilistic CRT analysis only — no signal is guaranteed to win. Trades are never auto-executed; always manage risk using Stop Loss.
+                </span>
               </div>
             </div>
           )}
 
           {/* -------------------------------------------------------------------
-              CASE 2: SELL DECISION ONLY (BEARISH CRT FULLY CONFIRMED)
-              ------------------------------------------------------------------- */}
-          {isSell && (
-            <div className="w-full rounded-2xl p-6 sm:p-7 border border-rose-400 bg-gradient-to-br from-rose-950/80 via-rose-900/30 to-[#120709] shadow-[0_0_45px_rgba(239,68,68,0.3)] ring-2 ring-rose-400/40 space-y-6 animate-in fade-in duration-300">
-              {/* Decision Header */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-rose-500/30">
-                <div className="flex items-center gap-3.5">
-                  <div className="w-14 h-14 rounded-2xl bg-white text-rose-800 flex items-center justify-center shrink-0 shadow-xl shadow-rose-500/20">
-                    <TrendingDown className="w-8 h-8 stroke-[3]" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2.5">
-                      <span className="text-3xl sm:text-4xl font-black font-mono text-white tracking-tight uppercase">
-                        SELL
-                      </span>
-                      <span className="px-3 py-1 rounded-full bg-white text-rose-900 text-xs font-black uppercase font-mono shadow-md animate-pulse">
-                        CONFIRMED SIGNAL
-                      </span>
-                    </div>
-                    <div className="text-xs font-mono text-rose-200/90 mt-1 flex items-center gap-2">
-                      <span className="font-bold">BEARISH CRT EXPANSION VALIDATED</span>
-                      <span>·</span>
-                      <span>Confirmation Time: <strong className="text-white">{confirmationTime}</strong></span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Primary Action Button */}
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={handleOpenConfirmedOrderModal}
-                    className="py-3 px-6 rounded-xl font-mono font-black text-sm uppercase tracking-wider bg-white hover:bg-rose-100 text-rose-950 shadow-lg shadow-rose-500/30 transition-all active:scale-95 flex items-center gap-2"
-                  >
-                    <TrendingDown className="w-4 h-4 stroke-[3]" />
-                    <span>CONNECT & EXECUTE SELL @ {currentBid.toFixed(decimals)}</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Reason for Selecting SELL */}
-              <div className="p-4 rounded-xl bg-black/50 border border-rose-500/30 space-y-2">
-                <div className="flex items-center gap-2 text-xs font-mono font-bold text-rose-300 uppercase">
-                  <ShieldCheck className="w-4 h-4 text-rose-400 shrink-0" />
-                  <span>Reason for Selecting SELL:</span>
-                </div>
-                <p className="text-xs text-slate-200 font-sans leading-relaxed">
-                  {selectionReason}
-                </p>
-                <div className="pt-2 border-t border-rose-500/20 flex flex-wrap items-center gap-3 text-[11px] font-mono text-rose-300/80">
-                  <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-rose-400" />
-                    Monthly Bearish Expansion
-                  </span>
-                  <span>·</span>
-                  <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-rose-400" />
-                    Weekly KL Mitigation
-                  </span>
-                  <span>·</span>
-                  <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-rose-400" />
-                    1H Purge Completed
-                  </span>
-                  <span>·</span>
-                  <span className="flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-rose-400" />
-                    5M SMT Model 1 Trigger
-                  </span>
-                </div>
-              </div>
-
-              {/* Exact Setup Parameters Grid: Entry, SL, TP1, TP2, TP3 */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 font-mono">
-                {/* SELL ENTRY PRICE */}
-                <div className="p-4 rounded-xl bg-black/60 border border-rose-500/40 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-rose-300 font-bold">
-                    SELL Entry Price
-                  </span>
-                  <div className="my-1 text-2xl font-black text-white tabular-nums">
-                    {entryPriceFormatted}
-                  </div>
-                  <span className="text-[10px] text-rose-200/70">Institutional Trigger</span>
-                </div>
-
-                {/* STOP LOSS */}
-                <div className="p-4 rounded-xl bg-rose-950/30 border border-rose-500/40 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-rose-400 font-bold">
-                    Stop Loss (SL)
-                  </span>
-                  <div className="my-1 text-2xl font-black text-rose-300 tabular-nums">
-                    {stopLossFormatted}
-                  </div>
-                  <span className="text-[10px] text-rose-400/80">Risk: {signal?.pipsRisk} Pips</span>
-                </div>
-
-                {/* TP1 */}
-                <div className="p-4 rounded-xl bg-rose-950/30 border border-rose-500/40 flex flex-col justify-between">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] uppercase tracking-wider text-rose-400 font-bold">
-                      TP1 (1:2)
-                    </span>
-                    <span className="text-[10px] text-rose-300 bg-rose-500/20 px-1 rounded font-bold">
-                      +{signal?.pipsReward1} Pips
-                    </span>
-                  </div>
-                  <div className="my-1 text-2xl font-black text-rose-300 tabular-nums">
-                    {tp1Formatted}
-                  </div>
-                  <span className="text-[10px] text-rose-400/80">Initial Target</span>
-                </div>
-
-                {/* TP2 */}
-                <div className="p-4 rounded-xl bg-rose-950/40 border border-rose-500/50 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-rose-400 font-bold">
-                    TP2 (1:3)
-                  </span>
-                  <div className="my-1 text-2xl font-black text-rose-300 tabular-nums">
-                    {tp2Formatted}
-                  </div>
-                  <span className="text-[10px] text-rose-400/80">Weekly Key Level</span>
-                </div>
-
-                {/* TP3 */}
-                <div className="col-span-2 sm:col-span-1 p-4 rounded-xl bg-amber-950/30 border border-amber-500/40 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-amber-400 font-bold flex items-center gap-1">
-                    <Target className="w-3.5 h-3.5" /> TP3 (1:5)
-                  </span>
-                  <div className="my-1 text-2xl font-black text-amber-300 tabular-nums">
-                    {tp3Formatted}
-                  </div>
-                  <span className="text-[10px] text-amber-400/80 truncate">Macro Pool Target</span>
-                </div>
-              </div>
-
-              {/* Action Toolbar */}
-              <div className="pt-2 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={handleCopySetup}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/60 hover:bg-neutral-900 border border-rose-500/30 text-rose-200 transition-colors"
-                  >
-                    {copied ? <Check className="w-3.5 h-3.5 text-rose-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copied ? 'Copied' : 'Copy Setup'}</span>
-                  </button>
-
-                  {onLogTrade && (
-                    <button
-                      onClick={handleLogTradeClick}
-                      className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/60 hover:bg-neutral-900 border border-rose-500/30 text-rose-200 transition-colors"
-                    >
-                      {logged ? <Check className="w-3.5 h-3.5 text-amber-400" /> : <BookmarkPlus className="w-3.5 h-3.5" />}
-                      <span>{logged ? 'Logged' : 'Log Trade'}</span>
-                    </button>
-                  )}
-                </div>
-
-                <div className="text-[11px] text-rose-300/80">
-                  Target Pool: <strong className="text-white">{signal?.targetLiquidityName} ({signal?.targetLiquidityPrice.toFixed(decimals)})</strong>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* -------------------------------------------------------------------
-              CASE 3: WAIT DECISION (NO CONFIRMED SETUP / CONDITIONS CONFLICT)
+              CASE 3: WAIT / STAGE 1 DETECTED / INVALIDATED / CLOSED
               ------------------------------------------------------------------- */}
           {isWait && (
             <div className="w-full rounded-2xl p-6 sm:p-7 border border-amber-500/50 bg-gradient-to-br from-amber-950/40 via-amber-900/15 to-[#0b0c10] shadow-[0_0_35px_rgba(245,158,11,0.15)] space-y-6 animate-in fade-in duration-300">
@@ -1132,42 +1303,77 @@ Broker: ${broker}`;
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-amber-500/30">
                 <div className="flex items-center gap-3.5">
                   <div className="w-14 h-14 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center shrink-0 shadow-xl shadow-amber-500/20">
-                    <PauseCircle className="w-8 h-8 stroke-[2.5]" />
+                    {isStage1Detected ? (
+                      <Hourglass className="w-8 h-8 stroke-[2.5] animate-pulse" />
+                    ) : isStageInvalid ? (
+                      <XCircle className="w-8 h-8 stroke-[2.5]" />
+                    ) : (
+                      <PauseCircle className="w-8 h-8 stroke-[2.5]" />
+                    )}
                   </div>
                   <div>
-                    <div className="flex items-center gap-2.5">
+                    <div className="flex flex-wrap items-center gap-2.5">
                       <span className="text-3xl sm:text-4xl font-black font-mono text-amber-400 tracking-tight uppercase">
                         WAIT
                       </span>
-                      <span className="px-3 py-1 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-bold uppercase font-mono">
-                        CAPITAL PRESERVATION
+                      <span
+                        className={`px-3 py-1 rounded-full text-xs font-black uppercase font-mono border ${
+                          isStage1Detected
+                            ? 'bg-amber-500 text-slate-950 border-amber-300 animate-pulse'
+                            : isStageInvalid
+                            ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
+                            : 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                        }`}
+                      >
+                        {isStage1Detected
+                          ? 'WAITING FOR MARKET CONFIRMATION'
+                          : isLockFinished && lockedDecision
+                          ? `PREVIOUS SETUP ${lockedDecision.lockStatus}`
+                          : isStageInvalid
+                          ? 'INVALID SETUP REJECTED'
+                          : 'CAPITAL PRESERVATION'}
                       </span>
                     </div>
-                    <div className="text-xs font-mono text-slate-300 mt-1 flex items-center gap-2">
-                      <span>NO VALID SETUP CONFIRMED</span>
+                    <div className="text-xs font-mono text-slate-300 mt-1.5 flex flex-wrap items-center gap-2">
+                      <span>
+                        Stage Status:{' '}
+                        <strong className="text-amber-300">
+                          {isStage1Detected
+                            ? `STAGE 1 DETECTED (${signal?.pendingDirection || 'PENDING'}) — NOT CONFIRMED`
+                            : twoStageStatus}
+                        </strong>
+                      </span>
                       <span>·</span>
-                      <span>Evaluation Time: <strong className="text-slate-100">{confirmationTime}</strong></span>
+                      <span>
+                        Candle Close Window: <strong className="text-slate-100">{confirmationCandleCloseFormatted}</strong>
+                      </span>
                     </div>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={onSearchSignal}
+                    onClick={isLockFinished ? onResetFinishedLock : onSearchSignal}
                     disabled={isSearching}
                     className="py-3 px-5 rounded-xl font-mono font-bold text-xs uppercase tracking-wider bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-md shadow-amber-500/20 transition-all active:scale-95 flex items-center gap-2"
                   >
                     {isSearching ? <Loader2 className="w-4 h-4 animate-spin text-slate-950" /> : <Search className="w-4 h-4" />}
-                    <span>Scan Market for Setup</span>
+                    <span>{isLockFinished ? 'Unlock & Scan New Setup' : 'Scan Market for Setup'}</span>
                   </button>
                 </div>
               </div>
 
-              {/* Reason for Selecting WAIT */}
+              {/* Reason for WAIT / Stage 1 / Invalidated */}
               <div className="p-4 rounded-xl bg-black/60 border border-amber-500/30 space-y-2">
                 <div className="flex items-center gap-2 text-xs font-mono font-bold text-amber-400 uppercase">
                   <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>Reason for Selecting WAIT:</span>
+                  <span>
+                    {isStage1Detected
+                      ? 'Stage 1 Setup Detected — Awaiting Closed 5M Confirmation:'
+                      : isLockFinished
+                      ? `Locked Trade Outcome (${lockedDecision?.lockStatus}):`
+                      : 'Reason for WAIT:'}
+                  </span>
                 </div>
                 <p className="text-xs text-slate-200 font-sans leading-relaxed">
                   {selectionReason}
@@ -1175,75 +1381,70 @@ Broker: ${broker}`;
                 <div className="pt-2 border-t border-amber-500/20 flex flex-wrap items-center gap-3 text-[11px] font-mono text-slate-400">
                   <span className="flex items-center gap-1.5 text-amber-300">
                     <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                    Strict Strategy Rule: Never guess, force trades, or present competing BUY vs SELL options
+                    Two-Stage Discipline: Never publish BUY or SELL before Stage 2 confirmation candle closes cleanly
                   </span>
-                  <span>·</span>
-                  <span>Awaiting clean institutional liquidity purge & 5M displacement</span>
                 </div>
               </div>
 
-              {/* Setup Parameters in WAIT State */}
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 font-mono">
-                {/* Entry Price */}
+              {/* Fixed Risk Parameters in WAIT / Previous Finished Lock State */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 font-mono">
                 <div className="p-4 rounded-xl bg-black/50 border border-neutral-800 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
-                    Entry Price
-                  </span>
-                  <div className="my-1 text-xl font-bold text-slate-300">
-                    ---
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
+                      Entry Price
+                    </span>
+                    <span className="text-[10px] font-bold text-amber-300 bg-amber-500/10 px-1.5 py-0.5 rounded">
+                      {FIXED_LOT_SIZE}.00 LOT
+                    </span>
                   </div>
-                  <span className="text-[10px] text-amber-400">No Trade Permitted</span>
+                  <div className="my-1.5 text-xl font-bold text-slate-300 tabular-nums">
+                    {isLockFinished && lockedDecision ? lockedDecision.entryPrice.toFixed(decimals) : '---'}
+                  </div>
+                  <span className="text-[10px] text-amber-400">
+                    {isStage1Detected ? 'Pending 5M Close' : isLockFinished ? 'Prior Setup Entry' : 'No Trade Permitted'}
+                  </span>
                 </div>
 
-                {/* Stop Loss */}
-                <div className="p-4 rounded-xl bg-black/50 border border-neutral-800 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
-                    Stop Loss (SL)
-                  </span>
-                  <div className="my-1 text-xs text-slate-300 font-mono">
-                    Calculated on 5M close
+                <div className="p-4 rounded-xl bg-black/50 border border-rose-500/25 flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] uppercase tracking-wider text-rose-400 font-bold">
+                      Stop Loss (SL)
+                    </span>
+                    <span className="text-[10px] font-bold text-rose-300 bg-rose-500/10 px-1.5 py-0.5 rounded">
+                      {FIXED_SL_RR}RR FIXED
+                    </span>
                   </div>
-                  <span className="text-[10px] text-slate-500">Awaiting Invalidation Wick</span>
+                  <div className="my-1.5 text-sm font-bold text-slate-300 font-mono tabular-nums">
+                    {isLockFinished && lockedDecision
+                      ? lockedDecision.stopLoss.toFixed(decimals)
+                      : `Auto ${FIXED_SL_RR}RR from Entry`}
+                  </div>
+                  <span className="text-[10px] text-slate-500">Mandatory Before Entry</span>
                 </div>
 
-                {/* TP1 */}
-                <div className="p-4 rounded-xl bg-black/50 border border-neutral-800 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
-                    Take Profit 1
-                  </span>
-                  <div className="my-1 text-xs text-slate-300 font-mono">
-                    Target: 1:2 R:R
+                <div className="p-4 rounded-xl bg-black/50 border border-emerald-500/25 flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] uppercase tracking-wider text-emerald-400 font-bold flex items-center gap-1">
+                      <Target className="w-3.5 h-3.5 text-emerald-400" /> Take Profit (TP)
+                    </span>
+                    <span className="text-[10px] font-bold text-emerald-300 bg-emerald-500/10 px-1.5 py-0.5 rounded">
+                      {FIXED_TP_RR}RR · 1:{FIXED_RISK_REWARD}
+                    </span>
                   </div>
-                  <span className="text-[10px] text-slate-500">Liquidity Target</span>
-                </div>
-
-                {/* TP2 */}
-                <div className="p-4 rounded-xl bg-black/50 border border-neutral-800 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-slate-400 font-bold">
-                    Take Profit 2
-                  </span>
-                  <div className="my-1 text-xs text-slate-300 font-mono">
-                    Target: 1:3 R:R
+                  <div className="my-1.5 text-sm font-bold text-slate-300 font-mono tabular-nums">
+                    {isLockFinished && lockedDecision
+                      ? (lockedDecision.takeProfit ?? lockedDecision.takeProfit1).toFixed(decimals)
+                      : `Auto ${FIXED_TP_RR}RR Target (1:${FIXED_RISK_REWARD})`}
                   </div>
-                  <span className="text-[10px] text-slate-500">Weekly Key Level</span>
-                </div>
-
-                {/* TP3 */}
-                <div className="col-span-2 sm:col-span-1 p-4 rounded-xl bg-black/50 border border-neutral-800 flex flex-col justify-between">
-                  <span className="text-[11px] uppercase tracking-wider text-slate-400 font-bold flex items-center gap-1">
-                    <Target className="w-3.5 h-3.5 text-amber-400" /> TP3 (Monthly)
-                  </span>
-                  <div className="my-1 text-xs text-slate-300 font-mono">
-                    Target: 1:5 R:R
-                  </div>
-                  <span className="text-[10px] text-slate-500 truncate">Macro Target Pool</span>
+                  <span className="text-[10px] text-slate-500">Mandatory Before Entry</span>
                 </div>
               </div>
 
-              {/* Status Note */}
-              <div className="pt-2 flex items-center justify-between text-xs font-mono text-slate-400">
-                <span>The app makes the signal decision automatically. The user only receives the selected trading direction.</span>
-                <span className="text-amber-400 font-bold">{selectedInstrument} · Status: WAIT</span>
+              <div className="pt-2 flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-slate-400">
+                <span>Probabilistic CRT analysis — no signal is guaranteed to win. Automatic single-decision mode active.</span>
+                <span className="text-amber-400 font-bold">
+                  {selectedInstrument} · Stage: {twoStageStatus} · Lock: {displayLockStatus}
+                </span>
               </div>
             </div>
           )}
@@ -1277,7 +1478,7 @@ Broker: ${broker}`;
         selectedInstrument={selectedInstrument}
         initialDirection={singleDecision === 'SELL' ? 'SELL' : 'BUY'}
         quoteTick={quoteTick}
-        signal={signal}
+        signal={isActivelyLocked && lockedDecision ? lockedDecision.originalSignal : signal}
         broker={broker}
         onOrderExecuted={handleOrderExecuted}
       />

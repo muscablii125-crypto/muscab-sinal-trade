@@ -2,7 +2,7 @@
  * MUSCAB CRT PRO - Domain Types & Strategy Interfaces
  */
 
-export type InstrumentId = 'XAUUSD' | 'AUDUSD' | 'NASDAQ';
+export type InstrumentId = 'XAUUSD' | 'EURUSD' | 'NASDAQ';
 
 export interface InstrumentInfo {
   id: InstrumentId;
@@ -65,7 +65,12 @@ export type SignalStatusType =
   | 'CONFIRMED_SIGNAL'
   | 'DETECTED_SETUP'
   | 'WAIT_FOR_SETUP'
+  | 'INVALID_SETUP'
   | 'ANALYZING';
+
+export type TwoStageSignalStatus = 'DETECTED' | 'WAITING' | 'CONFIRMED' | 'INVALID';
+
+export type TradeLockStatus = 'UNLOCKED' | 'LOCKED' | 'ACTIVE' | 'INVALIDATED' | 'CLOSED';
 
 // Professional 7-Period Session System (+ DEAD TIME)
 export type ForexSessionPeriod =
@@ -210,11 +215,14 @@ export interface CrtStrategyConfig {
   smtLookbackBars: number;
   smtSensitivity: 'CONSERVATIVE' | 'BALANCED' | 'AGGRESSIVE';
 
-  // Execution
+  // Fixed Risk Management (Locked at 1RR SL / 3RR TP / Lot Size 1)
   tp1Ratio: number;
   tp2Ratio: number;
   tp3Ratio: number;
   slBufferPips: number;
+  slRR?: number;
+  tpRR?: number;
+  lotSize?: number;
 }
 
 // Timeframe-Specific Analysis Results
@@ -328,6 +336,11 @@ export interface FiveMinAnalysis {
   notes: string;
   tsDetected: boolean;
   tsDetails: string;
+  confirmationCandleOpenTime?: number; // Unix seconds
+  confirmationCandleCloseTime?: number; // Epoch ms
+  isConfirmationCandleClosed?: boolean;
+  setupDetectedPendingClose?: boolean;
+  detectedDirection?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
 }
 
 export interface CrtSignalResult {
@@ -335,12 +348,22 @@ export interface CrtSignalResult {
   instrumentName: string;
   verdict: SignalVerdict; // BUY | SELL | WAIT
   status: SignalStatusType;
+  twoStageStatus?: TwoStageSignalStatus;
+  stageLabel?: string; // e.g., "WAITING FOR MARKET CONFIRMATION" | "MARKET CONFIRMED" | "INVALIDATED" | "SCANNING"
+  pendingDirection?: 'BUY' | 'SELL' | 'NONE';
+  confirmationCandleCloseTime?: number; // Epoch ms of closed 5M trigger candle
+  confirmationCandleCloseIso?: string;
+  confirmationReason?: string;
   timestamp: number;
   entryPrice: number;
   stopLoss: number;
+  takeProfit?: number;
   takeProfit1: number;
   takeProfit2: number;
   takeProfit3: number;
+  slRR?: number;
+  tpRR?: number;
+  lotSize?: number;
   riskReward1: number;
   riskReward2: number;
   riskReward3: number;
@@ -388,4 +411,42 @@ export interface CrtSignalResult {
   apiSymbol?: string;
   liveFeedStatus?: 'LIVE_CONNECTED' | 'DATA_UNAVAILABLE' | 'DATA_DISCONNECTED';
   lastUpdatedIso?: string;
+}
+
+export interface LockedTradeDecision {
+  id: string;
+  instrument: InstrumentId;
+  direction: 'BUY' | 'SELL';
+  lockStatus: TradeLockStatus; // LOCKED | ACTIVE | INVALIDATED | CLOSED
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit?: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  takeProfit3: number;
+  slRR?: number;
+  tpRR?: number;
+  lotSize?: number;
+  riskReward1: number;
+  riskReward2: number;
+  riskReward3: number;
+  pipsRisk: number;
+  pipsReward1: number;
+  confirmedAt: number; // Epoch ms
+  confirmationCandleCloseTime: number; // Epoch ms
+  confirmationCandleCloseIso: string;
+  reason: string;
+  targetLiquidityName: string;
+  targetLiquidityPrice: number;
+  tp1Hit: boolean;
+  tp2Hit: boolean;
+  tp3Hit: boolean;
+  slHit: boolean;
+  floatingPips: number;
+  highestFavorablePips: number;
+  lastCheckedPrice: number;
+  lastUpdatedAt: number;
+  statusNote: string;
+  closedOrInvalidatedAt?: number;
+  originalSignal: CrtSignalResult;
 }

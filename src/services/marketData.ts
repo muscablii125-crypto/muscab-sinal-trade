@@ -106,7 +106,7 @@ export async function fetchLiveQuotes(broker: 'BINANCE' | 'OANDA' = 'OANDA'): Pr
       quotesCache.set('XAUUSD', goldQuote);
       return {
         XAUUSD: goldQuote,
-        AUDUSD: quotesCache.get('AUDUSD') || null,
+        EURUSD: quotesCache.get('EURUSD') || null,
         NASDAQ: quotesCache.get('NASDAQ') || null,
       };
     }
@@ -160,7 +160,7 @@ export async function fetchLiveMarketDataset(
           feedStatus: 'LIVE_CONNECTED',
           dataProvider: data.provider || 'Institutional Market ECN',
           apiSymbol: data.apiSymbol || instrument,
-          unit: instrument === 'XAUUSD' ? 'USD per Troy Ounce' : instrument === 'AUDUSD' ? 'USD per AUD' : 'USD Index Points',
+          unit: instrument === 'XAUUSD' ? 'USD per Troy Ounce' : instrument === 'EURUSD' ? 'USD per EUR' : 'USD Index Points',
         };
 
         datasetCache.set(cacheKey, dataset);

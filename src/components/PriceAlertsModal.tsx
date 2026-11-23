@@ -1,6 +1,6 @@
 /**
  * Custom Price Alerts Management Modal for MUSCAB CRT PRO
- * Allows setting target price notifications for XAUUSD, AUDUSD, and NASDAQ.
+ * Allows setting target price notifications for XAUUSD, EURUSD, and NASDAQ.
  */
 
 import React, { useState } from 'react';
@@ -57,7 +57,7 @@ export const PriceAlertsModal: React.FC<PriceAlertsModalProps> = ({
     setSelectedInstrument(inst);
     const p = currentPrices[inst] || 0;
     const decimals = SUPPORTED_INSTRUMENTS[inst].decimals;
-    const offset = inst === 'AUDUSD' ? 0.001 : inst === 'NASDAQ' ? 20 : 5;
+    const offset = inst === 'EURUSD' ? 0.001 : inst === 'NASDAQ' ? 20 : 5;
     setTargetPriceStr((p + offset).toFixed(decimals));
     setErrorMsg('');
   };
@@ -166,7 +166,7 @@ export const PriceAlertsModal: React.FC<PriceAlertsModalProps> = ({
 
             {/* Instrument Tabs */}
             <div className="grid grid-cols-3 gap-2">
-              {(['XAUUSD', 'AUDUSD', 'NASDAQ'] as InstrumentId[]).map((inst) => {
+              {(['XAUUSD', 'EURUSD', 'NASDAQ'] as InstrumentId[]).map((inst) => {
                 const isSelected = selectedInstrument === inst;
                 const price = currentPrices[inst] || 0;
                 const decimals = SUPPORTED_INSTRUMENTS[inst].decimals;

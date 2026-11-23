@@ -29,6 +29,7 @@ import {
 import { SUPPORTED_INSTRUMENTS } from '../constants/instruments';
 import { getCandleCountdownSeconds, formatCountdown } from '../services/sessionClock';
 import { soundEffects } from '../services/soundEffects';
+import { FIXED_LOT_SIZE, FIXED_SL_RR, FIXED_TP_RR, calculateFixedRiskLevels } from '../services/fixedRiskManagement';
 import {
   Maximize2,
   Activity,
@@ -255,35 +256,28 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     }
   };
 
-  // Helper: Initial stop distance per instrument
-  const getInitialStopDistance = (inst: InstrumentId, currentPrice: number): number => {
-    if (inst === 'AUDUSD') return 0.0015; // 15 pips
-    if (inst === 'XAUUSD') return 12.0;   // $12 gold move
-    if (inst === 'NASDAQ') return 50.0;   // 50 index points
-    return currentPrice * 0.005;
-  };
-
-  // Create new Long or Short Position
+  // Create new Long or Short Position (1RR SL / 3RR TP · Lot Size 1)
   const handleCreatePosition = (type: 'LONG' | 'SHORT', time: number, price: number) => {
-    const stopDist = getInitialStopDistance(instrument, price);
+    const fixed = calculateFixedRiskLevels(price, type === 'LONG' ? 'BUY' : 'SELL', instrument);
+    if (!fixed.valid) return;
     const intervalSec =
       candles.length > 1
         ? Math.max(60, candles[candles.length - 1].time - candles[candles.length - 2].time)
         : 300;
     const endTime = time + 16 * intervalSec;
 
-    const isLong = type === 'LONG';
     const newPos: PositionDrawing = {
       id: `pos_${type.toLowerCase()}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       instrument,
       type,
       startTime: time,
       endTime,
-      entryPrice: price,
-      takeProfitPrice: isLong ? price + stopDist * 2 : price - stopDist * 2,
-      stopLossPrice: isLong ? price - stopDist : price + stopDist,
+      entryPrice: fixed.entryPrice,
+      takeProfitPrice: fixed.takeProfit,
+      stopLossPrice: fixed.stopLoss,
       accountSize: 10000,
       riskPercent: 1,
+      lotSize: FIXED_LOT_SIZE,
     };
 
     const updatedPositions = [...positions, newPos];
@@ -295,21 +289,25 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     soundEffects.playAlertChime();
   };
 
-  // Invert Position (Long <-> Short)
+  // Invert Position (Long <-> Short) keeping 1RR SL / 3RR TP · Lot Size 1
   const handleInvertPosition = (posId: string) => {
     setPositions((prev) => {
       const updated = prev.map((pos) => {
         if (pos.id !== posId) return pos;
         const isCurrentlyLong = pos.type === 'LONG';
         const newType: PositionType = isCurrentlyLong ? 'SHORT' : 'LONG';
-        const rewardDist = Math.abs(pos.takeProfitPrice - pos.entryPrice);
-        const riskDist = Math.abs(pos.stopLossPrice - pos.entryPrice);
+        const fixed = calculateFixedRiskLevels(
+          pos.entryPrice,
+          newType === 'LONG' ? 'BUY' : 'SELL',
+          instrument
+        );
 
         return {
           ...pos,
           type: newType,
-          takeProfitPrice: newType === 'LONG' ? pos.entryPrice + rewardDist : pos.entryPrice - rewardDist,
-          stopLossPrice: newType === 'LONG' ? pos.entryPrice - riskDist : pos.entryPrice + riskDist,
+          takeProfitPrice: fixed.valid ? fixed.takeProfit : pos.takeProfitPrice,
+          stopLossPrice: fixed.valid ? fixed.stopLoss : pos.stopLossPrice,
+          lotSize: FIXED_LOT_SIZE,
         };
       });
       pushHistory(trendLines, updated);
@@ -318,21 +316,26 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     soundEffects.playAlertChime();
   };
 
-  // Snap position entry to live mid price
+  // Snap position entry to live mid price with 1RR SL / 3RR TP · Lot Size 1
   const handleSnapPositionToLive = (posId: string) => {
     if (!liveMidPrice || liveMidPrice <= 0) return;
     setPositions((prev) => {
       const updated = prev.map((pos) => {
         if (pos.id !== posId) return pos;
-        const rewardDist = Math.abs(pos.takeProfitPrice - pos.entryPrice);
-        const riskDist = Math.abs(pos.stopLossPrice - pos.entryPrice);
-        const isLong = pos.type === 'LONG';
+        const fixed = calculateFixedRiskLevels(
+          liveMidPrice,
+          pos.type === 'LONG' ? 'BUY' : 'SELL',
+          instrument,
+          pos.stopLossPrice
+        );
+        if (!fixed.valid) return pos;
 
         return {
           ...pos,
-          entryPrice: liveMidPrice,
-          takeProfitPrice: isLong ? liveMidPrice + rewardDist : liveMidPrice - rewardDist,
-          stopLossPrice: isLong ? liveMidPrice - riskDist : liveMidPrice + riskDist,
+          entryPrice: fixed.entryPrice,
+          takeProfitPrice: fixed.takeProfit,
+          stopLossPrice: fixed.stopLoss,
+          lotSize: FIXED_LOT_SIZE,
         };
       });
       pushHistory(trendLines, updated);
@@ -341,23 +344,29 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     soundEffects.playAlertChime();
   };
 
-  // Apply CRT Signal entry, TP, and SL to position
+  // Apply CRT Signal entry, 3RR TP, and 1RR SL to position
   const handleApplyCrtSignalToPosition = (posId: string) => {
-    if (!signal || signal.entryPrice <= 0) return;
+    if (!signal || signal.entryPrice <= 0 || signal.stopLoss <= 0 || signal.takeProfit1 <= 0) return;
     setPositions((prev) => {
       const updated = prev.map((pos) => {
         if (pos.id !== posId) return pos;
         const isBuy = signal.verdict === 'BUY';
         const newType: PositionType = isBuy ? 'LONG' : 'SHORT';
-        const tp = signal.takeProfit1 || (isBuy ? signal.entryPrice * 1.01 : signal.entryPrice * 0.99);
-        const sl = signal.stopLoss || (isBuy ? signal.entryPrice * 0.995 : signal.entryPrice * 1.005);
+        const fixed = calculateFixedRiskLevels(
+          signal.entryPrice,
+          isBuy ? 'BUY' : 'SELL',
+          instrument,
+          signal.stopLoss
+        );
+        if (!fixed.valid) return pos;
 
         return {
           ...pos,
           type: newType,
-          entryPrice: signal.entryPrice,
-          takeProfitPrice: tp,
-          stopLossPrice: sl,
+          entryPrice: fixed.entryPrice,
+          takeProfitPrice: fixed.takeProfit,
+          stopLossPrice: fixed.stopLoss,
+          lotSize: FIXED_LOT_SIZE,
         };
       });
       pushHistory(trendLines, updated);
@@ -696,8 +705,15 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       );
     }
 
-    // 3. Draw Trade Levels (Entry, SL, TP)
-    if (signal && showOverlays.tradeLevels && signal.status === 'CONFIRMED_SIGNAL') {
+    // 3. Draw Trade Levels (Entry, Fixed 1RR SL, Fixed 3RR TP)
+    if (
+      signal &&
+      showOverlays.tradeLevels &&
+      signal.status === 'CONFIRMED_SIGNAL' &&
+      signal.entryPrice > 0 &&
+      signal.stopLoss > 0 &&
+      signal.takeProfit1 > 0
+    ) {
       priceLinesRef.current.push(
         seriesRef.current.createPriceLine({
           price: signal.entryPrice,
@@ -705,7 +721,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           axisLabelVisible: true,
-          title: `${signal.verdict} ENTRY`,
+          title: `${signal.verdict} ENTRY (${FIXED_LOT_SIZE} LOT)`,
         })
       );
 
@@ -716,29 +732,18 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           lineWidth: 2,
           lineStyle: LineStyle.Dashed,
           axisLabelVisible: true,
-          title: 'STOP LOSS',
+          title: `STOP LOSS (${FIXED_SL_RR}RR)`,
         })
       );
 
       priceLinesRef.current.push(
         seriesRef.current.createPriceLine({
-          price: signal.takeProfit1,
-          color: '#10b981',
-          lineWidth: 1,
-          lineStyle: LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: `TP1 (1:${signal.riskReward1})`,
-        })
-      );
-
-      priceLinesRef.current.push(
-        seriesRef.current.createPriceLine({
-          price: signal.takeProfit2,
+          price: signal.takeProfit ?? signal.takeProfit1,
           color: '#10b981',
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           axisLabelVisible: true,
-          title: `TP2 (${signal.targetLiquidityName || 'KL'})`,
+          title: `TAKE PROFIT (${FIXED_TP_RR}RR)`,
         })
       );
     }
@@ -1021,8 +1026,8 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
           {/* External Link directly to TradingView.com */}
           <a
             href={`https://www.tradingview.com/chart/?symbol=${
-              instrument === 'AUDUSD'
-                ? 'OANDA%3AAUDUSD'
+              instrument === 'EURUSD'
+                ? 'OANDA%3AEURUSD'
                 : instrument === 'XAUUSD'
                 ? 'OANDA%3AXAUUSD'
                 : 'NASDAQ%3ANDX'
@@ -1185,7 +1190,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
                 ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300'
                 : 'bg-neutral-900 border-neutral-800 text-slate-500'
             }`}
-            title="Toggle Entry, SL, TP1, TP2, TP3"
+            title={`Toggle Entry, SL (${FIXED_SL_RR}RR), TP (${FIXED_TP_RR}RR)`}
           >
             Trade Levels
           </button>

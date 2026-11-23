@@ -104,7 +104,7 @@ export const LivePriceTicker: React.FC<LivePriceTickerProps> = ({
           {/* Instrument Pair Tag */}
           <div className="flex items-center gap-1.5 text-slate-300">
             <span className="font-extrabold text-white text-sm">
-              {selectedInstrument === 'AUDUSD' ? 'AUD/USD' : selectedInstrument === 'XAUUSD' ? 'XAU/USD' : 'NASDAQ (NAS100)'}
+              {selectedInstrument === 'EURUSD' ? 'EUR/USD' : selectedInstrument === 'XAUUSD' ? 'XAU/USD' : 'NASDAQ (NAS100)'}
             </span>
             <span className="text-[11px] text-slate-400">· {instrumentInfo.name}</span>
           </div>
@@ -189,7 +189,7 @@ export const LivePriceTicker: React.FC<LivePriceTickerProps> = ({
             <div className="text-3xl sm:text-4xl font-mono font-extrabold text-white tracking-tight tabular-nums flex items-baseline gap-2">
               <span>{isConnected ? currentMid.toFixed(decimals) : '---'}</span>
               <span className="text-xs font-normal text-slate-400 font-sans">
-                {selectedInstrument === 'XAUUSD' ? 'USD/oz' : selectedInstrument === 'AUDUSD' ? 'USD per AUD' : 'Pts'}
+                {selectedInstrument === 'XAUUSD' ? 'USD/oz' : selectedInstrument === 'EURUSD' ? 'USD per EUR' : 'Pts'}
               </span>
             </div>
           </div>
@@ -269,7 +269,7 @@ export const LivePriceTicker: React.FC<LivePriceTickerProps> = ({
       <div className="mt-2 text-[10px] font-mono text-slate-400 leading-relaxed bg-black/40 px-3 py-1.5 rounded-lg border border-neutral-900 flex items-center gap-1.5">
         <ShieldCheck className="w-3.5 h-3.5 text-amber-400/80 shrink-0" />
         <span>
-          <strong>Broker Synchronization Guarantee:</strong> AUD/USD prices and CRT levels are derived strictly from genuine market feeds calibrated to {broker === 'OANDA' ? 'OANDA retail spreads (0.9 pips)' : 'Interbank ECN'}. Exact tick synchronization is guaranteed only when using identical broker liquidity pools.
+          <strong>Broker Synchronization Guarantee:</strong> EUR/USD prices and CRT levels are derived strictly from genuine market feeds calibrated to {broker === 'OANDA' ? 'OANDA retail spreads (0.9 pips)' : 'Interbank ECN'}. Exact tick synchronization is guaranteed only when using identical broker liquidity pools.
         </span>
       </div>
     </div>

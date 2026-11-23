@@ -6,7 +6,13 @@
 import React, { useState } from 'react';
 import { CrtStrategyConfig } from '../types/trading';
 import { DEFAULT_CRT_RULES } from '../constants/instruments';
-import { X, SlidersHorizontal, RotateCcw, Check, ShieldCheck, Info } from 'lucide-react';
+import {
+  FIXED_SL_RR,
+  FIXED_TP_RR,
+  FIXED_RISK_REWARD,
+  FIXED_LOT_SIZE,
+} from '../services/fixedRiskManagement';
+import { X, SlidersHorizontal, RotateCcw, Check, ShieldCheck, Info, Lock } from 'lucide-react';
 
 interface StrategyConfigModalProps {
   isOpen: boolean;
@@ -38,7 +44,15 @@ export const StrategyConfigModal: React.FC<StrategyConfigModalProps> = ({
   };
 
   const handleSave = () => {
-    onSaveConfig(formData);
+    onSaveConfig({
+      ...formData,
+      tp1Ratio: FIXED_RISK_REWARD,
+      tp2Ratio: FIXED_RISK_REWARD,
+      tp3Ratio: FIXED_RISK_REWARD,
+      slRR: FIXED_SL_RR,
+      tpRR: FIXED_TP_RR,
+      lotSize: FIXED_LOT_SIZE,
+    });
     onClose();
   };
 
@@ -254,60 +268,47 @@ export const StrategyConfigModal: React.FC<StrategyConfigModalProps> = ({
             </div>
           </div>
 
-          {/* 4. Risk / Reward Ratios & Execution */}
-          <div className="rounded-xl border border-neutral-800 bg-[#12141c] p-4">
+          {/* 4. Fixed Risk Management (Locked at 1RR SL, 3RR TP & Lot Size 1) */}
+          <div className="rounded-xl border border-amber-500/35 bg-[#12141c] p-4">
             <div className="flex items-center justify-between mb-3">
               <span className="font-bold text-sm text-slate-100 flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-amber-400" />
-                Target Ratios & Stop Loss Buffer
+                <Lock className="w-4 h-4 text-amber-400" />
+                Fixed Risk Management (Immutable Rule)
               </span>
-              <span className="text-[11px] font-mono text-slate-400">TP1 / TP2 / TP3</span>
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-bold">
+                LOCKED AT {FIXED_SL_RR}RR SL / {FIXED_TP_RR}RR TP · {FIXED_LOT_SIZE} LOT
+              </span>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-              <div>
-                <label className="text-slate-300 font-medium block mb-1">
-                  Take Profit 1 Ratio (R:R)
-                </label>
-                <input
-                  type="number"
-                  min="1.5"
-                  max="4.0"
-                  step="0.5"
-                  value={formData.tp1Ratio}
-                  onChange={(e) => handleChange('tp1Ratio', Number(e.target.value))}
-                  className="w-full bg-[#181a24] border border-neutral-700 rounded-lg px-3 py-2 text-white font-mono"
-                />
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono">
+              <div className="p-3 rounded-lg bg-rose-950/25 border border-rose-500/35">
+                <span className="text-rose-400 font-bold uppercase text-[10px] block mb-1">
+                  Stop Loss
+                </span>
+                <div className="text-lg font-black text-rose-300">{FIXED_SL_RR}RR (1R)</div>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  Anchored to 5M CRT structure (BUY &amp; SELL)
+                </span>
               </div>
 
-              <div>
-                <label className="text-slate-300 font-medium block mb-1">
-                  Take Profit 2 Ratio (R:R)
-                </label>
-                <input
-                  type="number"
-                  min="2.5"
-                  max="6.0"
-                  step="0.5"
-                  value={formData.tp2Ratio}
-                  onChange={(e) => handleChange('tp2Ratio', Number(e.target.value))}
-                  className="w-full bg-[#181a24] border border-neutral-700 rounded-lg px-3 py-2 text-white font-mono"
-                />
+              <div className="p-3 rounded-lg bg-emerald-950/25 border border-emerald-500/35">
+                <span className="text-emerald-400 font-bold uppercase text-[10px] block mb-1">
+                  Target (Take Profit)
+                </span>
+                <div className="text-lg font-black text-emerald-300">{FIXED_TP_RR}RR (1:{FIXED_RISK_REWARD})</div>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  3x Stop Loss distance from Entry
+                </span>
               </div>
 
-              <div>
-                <label className="text-slate-300 font-medium block mb-1">
-                  SL Invalidation Buffer (Pips)
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="15"
-                  step="1"
-                  value={formData.slBufferPips}
-                  onChange={(e) => handleChange('slBufferPips', Number(e.target.value))}
-                  className="w-full bg-[#181a24] border border-neutral-700 rounded-lg px-3 py-2 text-white font-mono"
-                />
+              <div className="p-3 rounded-lg bg-[#181a24] border border-neutral-700/70">
+                <span className="text-amber-400 font-bold uppercase text-[10px] block mb-1">
+                  Fixed Lot Size
+                </span>
+                <div className="text-lg font-black text-white">{FIXED_LOT_SIZE}.00 Lot</div>
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  Never opens trade without SL &amp; TP
+                </span>
               </div>
             </div>
           </div>

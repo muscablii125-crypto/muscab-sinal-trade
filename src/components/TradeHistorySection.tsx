@@ -97,7 +97,7 @@ export const TradeHistorySection: React.FC<TradeHistorySectionProps> = ({ onTrad
         <div className="flex items-center gap-2">
           {/* Instrument Filters */}
           <div className="flex items-center bg-neutral-900 border border-neutral-800 rounded-lg p-0.5 text-xs font-mono">
-            {(['ALL', 'XAUUSD', 'AUDUSD', 'NASDAQ'] as const).map((inst) => (
+            {(['ALL', 'XAUUSD', 'EURUSD', 'NASDAQ'] as const).map((inst) => (
               <button
                 key={inst}
                 onClick={() => setSelectedFilter(inst)}
@@ -193,8 +193,8 @@ export const TradeHistorySection: React.FC<TradeHistorySectionProps> = ({ onTrad
               <th className="py-3 px-3">Instrument</th>
               <th className="py-3 px-3">Direction</th>
               <th className="py-3 px-3">Entry Price</th>
-              <th className="py-3 px-3">Stop Loss</th>
-              <th className="py-3 px-4">Liquidity Target</th>
+              <th className="py-3 px-3">Stop Loss (1RR)</th>
+              <th className="py-3 px-4">Take Profit (3RR)</th>
               <th className="py-3 px-3 text-center">Result</th>
               <th className="py-3 px-3 text-right">PnL (Pips)</th>
               <th className="py-3 px-4 text-right">Actions</th>
@@ -255,22 +255,22 @@ export const TradeHistorySection: React.FC<TradeHistorySectionProps> = ({ onTrad
 
                     {/* Entry Price */}
                     <td className="py-3 px-3 whitespace-nowrap font-mono font-bold text-white tabular-nums">
-                      {trade.entryPrice.toFixed(trade.instrument === 'AUDUSD' ? 5 : 2)}
+                      {trade.entryPrice.toFixed(trade.instrument === 'EURUSD' ? 5 : 2)}
                     </td>
 
                     {/* Stop Loss */}
                     <td className="py-3 px-3 whitespace-nowrap font-mono text-rose-400 tabular-nums">
-                      {trade.stopLoss.toFixed(trade.instrument === 'AUDUSD' ? 5 : 2)}
+                      {trade.stopLoss.toFixed(trade.instrument === 'EURUSD' ? 5 : 2)}
                     </td>
 
-                    {/* Target Level */}
+                    {/* Take Profit (3RR) */}
                     <td className="py-3 px-4 whitespace-nowrap">
-                      <div className="text-slate-200 flex items-center gap-1 font-semibold">
-                        <Target className="w-3 h-3 text-amber-400 shrink-0" />
-                        <span>{trade.targetLevel}</span>
+                      <div className="text-emerald-300 flex items-center gap-1 font-bold tabular-nums">
+                        <Target className="w-3 h-3 text-emerald-400 shrink-0" />
+                        <span>{trade.takeProfit1.toFixed(trade.instrument === 'EURUSD' ? 5 : 2)}</span>
                       </div>
                       <div className="text-[10px] text-slate-500 font-mono">
-                        Target Price: {trade.targetPrice.toFixed(trade.instrument === 'AUDUSD' ? 5 : 2)}
+                        {trade.targetLevel}
                       </div>
                     </td>
 

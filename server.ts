@@ -252,7 +252,7 @@ async function startServer() {
   // Genuine live market candles endpoint (Monthly, Weekly, 1D, 4H, 1H, 30M, 15M, 5M)
   app.get('/api/market/candles', async (req: Request, res: Response) => {
     try {
-      const symbol = ((req.query.symbol || req.query.instrument) as 'XAUUSD' | 'AUDUSD' | 'NASDAQ') || 'XAUUSD';
+      const symbol = ((req.query.symbol || req.query.instrument) as 'XAUUSD' | 'EURUSD' | 'NASDAQ') || 'XAUUSD';
       const timeframe = (req.query.timeframe as string) || '5M';
       const broker = (req.query.broker as 'BINANCE' | 'OANDA') || 'OANDA';
       const dataset = await fetchLiveCandles(symbol, timeframe, broker);
@@ -292,14 +292,13 @@ async function startServer() {
 - **5M SMT Model 1**: ${signal.fiveMin.smtModel1Details}
 - **Entry Trigger**: ${signal.fiveMin.entryTriggerDetails}
 
-#### 4. Summary & Invalidation
+#### 4. Summary & Fixed Risk Management (1RR SL / 3RR TP · Lot Size 1)
+- **Lot Size**: 1.00 Standard Lot
 - **Entry**: ${signal.entryPrice}
-- **Stop Loss**: ${signal.stopLoss}
-- **TP1**: ${signal.takeProfit1} (1:${signal.riskReward1})
-- **TP2**: ${signal.takeProfit2} (1:${signal.riskReward2})
-- **TP3**: ${signal.takeProfit3} (1:${signal.riskReward3})
+- **Stop Loss (1RR Fixed)**: ${signal.stopLoss}
+- **Take Profit (3RR Target)**: ${signal.takeProfit ?? signal.takeProfit1} (1:3 Fixed R:R)
 
-*Strictly adheres to MUSCAB CRT PRO rules without extraneous indicators.*`,
+*Strictly adheres to MUSCAB CRT PRO rules and Fixed 1RR SL / 3RR TP / 1.00 Lot risk management without extraneous indicators.*`,
       });
     }
 
@@ -316,17 +315,17 @@ Analyze this trading setup strictly using Candle Range Theory (CRT) concepts:
 CRITICAL RULES:
 - DO NOT use generic indicators, FVG, or unrelated retail ICT concepts.
 - Use ONLY the provided CRT parameters and timeframes.
+- Respect Fixed Risk Management: Fixed 1RR Stop Loss, Fixed 3RR Take Profit from Entry Price (1:3 Fixed R:R), and Fixed Lot Size 1.00.
 - Write a crisp, professional institutional trade brief.
 
 Setup Details:
 - Instrument: ${signal.instrumentName} (${signal.instrument})
 - Verdict: ${signal.verdict} (${signal.status})
 - Session: ${signal.tradingSession}
+- Lot Size: 1.00 Standard Lot
 - Entry Price: ${signal.entryPrice}
-- Stop Loss: ${signal.stopLoss}
-- TP1: ${signal.takeProfit1} (1:${signal.riskReward1})
-- TP2: ${signal.takeProfit2} (1:${signal.riskReward2})
-- TP3: ${signal.takeProfit3} (1:${signal.riskReward3})
+- Fixed Stop Loss (1RR): ${signal.stopLoss}
+- Fixed Take Profit (3RR): ${signal.takeProfit ?? signal.takeProfit1} (1:3 Fixed R:R)
 - Monthly: ${signal.monthlyDirection} (Target: ${signal.monthly.monthlyTarget})
 - Weekly KL Retest: ${signal.weekly.priceReturnedToKL ? 'Yes' : 'No'}
 - 1H Purge: ${signal.hourly.purgeDetails}

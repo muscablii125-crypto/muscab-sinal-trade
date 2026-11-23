@@ -1,10 +1,12 @@
 /**
  * Price Alert Manager for MUSCAB CRT PRO
- * Allows setting custom price target alerts for XAUUSD, AUDUSD, and NASDAQ.
+ * Allows setting custom price target alerts for XAUUSD, EURUSD, and NASDAQ.
  * Detects threshold crossings and triggers visual toasts + audio chimes.
  */
 
 import { InstrumentId, PriceAlert } from '../types/trading';
+
+import { SUPPORTED_INSTRUMENTS } from '../constants/instruments';
 
 const STORAGE_KEY = 'muscab_price_alerts';
 
@@ -19,7 +21,10 @@ class PriceAlertsService {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
-        this.alerts = JSON.parse(stored);
+        const parsed = JSON.parse(stored);
+        this.alerts = Array.isArray(parsed)
+          ? parsed.filter((a: PriceAlert) => a.instrument in SUPPORTED_INSTRUMENTS)
+          : [];
       } else {
         this.alerts = [];
       }

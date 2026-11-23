@@ -7,6 +7,13 @@ import React, { useState } from 'react';
 import { CrtSignalResult } from '../types/trading';
 import { SUPPORTED_INSTRUMENTS } from '../constants/instruments';
 import {
+  FIXED_SL_RR,
+  FIXED_TP_RR,
+  FIXED_RISK_REWARD,
+  FIXED_LOT_SIZE,
+  calculateFixedRiskLevels,
+} from '../services/fixedRiskManagement';
+import {
   Coins,
   Calculator,
   Flame,
@@ -29,11 +36,8 @@ export const GoldCfdSpecsCard: React.FC<GoldCfdSpecsCardProps> = ({
   signal,
   onQuickSearchGold,
 }) => {
-  // Calculator State
+  // Calculator State (Fixed 1RR SL, 3RR TP & 1.00 Standard Lot applied automatically)
   const [accountBalance, setAccountBalance] = useState<number>(10000);
-  const [riskPercent, setRiskPercent] = useState<number>(1.0);
-  const customSlPips = signal && signal.instrument === 'XAUUSD' ? signal.pipsRisk : 12.0;
-  const [slPips, setSlPips] = useState<number>(customSlPips);
 
   const goldInfo = SUPPORTED_INSTRUMENTS.XAUUSD;
   const spreadPips = goldInfo.spreadPips || 1.6;
@@ -42,19 +46,20 @@ export const GoldCfdSpecsCard: React.FC<GoldCfdSpecsCardProps> = ({
   const bidPrice = Number((currentGoldPrice - (spreadPips * goldInfo.pipSize) / 2).toFixed(2));
   const askPrice = Number((currentGoldPrice + (spreadPips * goldInfo.pipSize) / 2).toFixed(2));
 
-  // Risk Math:
-  // For XAUUSD CFD: 1 Standard Lot (100 oz) -> 1 pip ($0.10 price change) = $10.00 USD
-  const dollarRisk = (accountBalance * riskPercent) / 100;
-  const pipValuePerStandardLot = 10.0; // $10 per pip on 100 oz contract
-  const calculatedLots = slPips > 0 ? Number((dollarRisk / (slPips * pipValuePerStandardLot)).toFixed(2)) : 0.5;
+  const fixedGoldLevels = calculateFixedRiskLevels(
+    currentGoldPrice,
+    signal?.verdict === 'SELL' ? 'SELL' : 'BUY',
+    'XAUUSD',
+    signal?.stopLoss
+  );
+  const slPips = fixedGoldLevels.pipsRisk > 0 ? fixedGoldLevels.pipsRisk : 65;
+  const tpPips = fixedGoldLevels.pipsReward > 0 ? fixedGoldLevels.pipsReward : 195;
 
-  const tp1Pips = slPips * 2.0;
-  const tp2Pips = slPips * 3.5;
-  const tp3Pips = slPips * 5.0;
-
-  const expectedGainTp1 = (calculatedLots * tp1Pips * pipValuePerStandardLot).toFixed(2);
-  const expectedGainTp2 = (calculatedLots * tp2Pips * pipValuePerStandardLot).toFixed(2);
-  const expectedGainTp3 = (calculatedLots * tp3Pips * pipValuePerStandardLot).toFixed(2);
+  // Risk Math for Fixed 1.00 Standard Lot (100 oz -> 1 pip = $10.00 USD)
+  const pipValuePerStandardLot = 10.0;
+  const calculatedLots = FIXED_LOT_SIZE;
+  const dollarRisk = Number((calculatedLots * slPips * pipValuePerStandardLot).toFixed(2));
+  const expectedGainTp = Number((calculatedLots * tpPips * pipValuePerStandardLot).toFixed(2));
 
   return (
     <div className="w-full rounded-2xl border border-amber-500/30 bg-gradient-to-b from-[#14120c] via-[#0d0e14] to-[#090a0f] p-5 shadow-2xl">
@@ -165,13 +170,15 @@ export const GoldCfdSpecsCard: React.FC<GoldCfdSpecsCardProps> = ({
           </div>
         </div>
 
-        {/* Right: Interactive XAUUSD CFD Position & Risk Calculator */}
+        {/* Right: XAUUSD CFD Fixed Lot & 1RR / 3RR Risk Profile */}
         <div className="lg:col-span-6 rounded-xl border border-neutral-800 bg-[#0f1118] p-4 text-xs font-mono">
           <div className="flex items-center justify-between text-slate-300 mb-3 font-sans font-bold">
             <span className="flex items-center gap-1.5 text-amber-400">
-              <Calculator className="w-4 h-4" /> Gold CFD Lot Size & Risk Calculator
+              <Calculator className="w-4 h-4" /> Gold CFD Fixed Lot &amp; 1:3 R:R Profile
             </span>
-            <span className="text-[11px] text-emerald-400 font-mono">1:2 to 1:5 R:R Targets</span>
+            <span className="text-[11px] text-emerald-400 font-mono">
+              {FIXED_SL_RR}RR SL / {FIXED_TP_RR}RR TP (1:{FIXED_RISK_REWARD})
+            </span>
           </div>
 
           <div className="grid grid-cols-3 gap-3 mb-3">
@@ -188,29 +195,17 @@ export const GoldCfdSpecsCard: React.FC<GoldCfdSpecsCardProps> = ({
             </div>
 
             <div>
-              <label className="text-[11px] text-slate-400 block mb-1">Risk (%)</label>
-              <input
-                type="number"
-                min="0.25"
-                max="5.0"
-                step="0.25"
-                value={riskPercent}
-                onChange={(e) => setRiskPercent(Number(e.target.value))}
-                className="w-full bg-[#161824] border border-neutral-700 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs"
-              />
+              <label className="text-[11px] text-slate-400 block mb-1">Fixed Lot Size</label>
+              <div className="w-full bg-amber-500/15 border border-amber-500/40 rounded-lg px-2.5 py-1.5 text-amber-300 font-mono text-xs font-bold">
+                {calculatedLots.toFixed(2)} Lot
+              </div>
             </div>
 
             <div>
-              <label className="text-[11px] text-slate-400 block mb-1">Stop Loss (Pips)</label>
-              <input
-                type="number"
-                min="2.0"
-                max="50.0"
-                step="0.5"
-                value={slPips}
-                onChange={(e) => setSlPips(Number(e.target.value))}
-                className="w-full bg-[#161824] border border-neutral-700 rounded-lg px-2.5 py-1.5 text-white font-mono text-xs"
-              />
+              <label className="text-[11px] text-slate-400 block mb-1">Stop Loss ({FIXED_SL_RR}RR)</label>
+              <div className="w-full bg-[#161824] border border-rose-500/40 rounded-lg px-2.5 py-1.5 text-rose-300 font-mono text-xs font-bold">
+                {slPips} pips
+              </div>
             </div>
           </div>
 
@@ -218,13 +213,13 @@ export const GoldCfdSpecsCard: React.FC<GoldCfdSpecsCardProps> = ({
           <div className="p-3 rounded-lg bg-gradient-to-r from-amber-500/10 via-[#161824] to-[#12141f] border border-amber-500/30 mb-3">
             <div className="flex items-center justify-between">
               <div>
-                <span className="text-[10px] uppercase text-slate-400 block">Recommended Position Size</span>
+                <span className="text-[10px] uppercase text-slate-400 block">Fixed Position Size</span>
                 <span className="text-xl font-black text-amber-400 font-mono">
-                  {calculatedLots} <span className="text-xs text-slate-300 font-normal">Lots (100 oz/lot)</span>
+                  {calculatedLots.toFixed(2)} <span className="text-xs text-slate-300 font-normal">Lot (100 oz · $10/pip)</span>
                 </span>
               </div>
               <div className="text-right">
-                <span className="text-[10px] uppercase text-slate-400 block">Maximum Risk</span>
+                <span className="text-[10px] uppercase text-slate-400 block">Risk at {FIXED_SL_RR}RR SL</span>
                 <span className="text-base font-extrabold text-rose-400 font-mono">
                   -${dollarRisk.toFixed(2)}
                 </span>
@@ -232,21 +227,21 @@ export const GoldCfdSpecsCard: React.FC<GoldCfdSpecsCardProps> = ({
             </div>
           </div>
 
-          {/* Projected Target Gains */}
+          {/* Fixed Entry / 1RR SL / 3RR TP Levels */}
           <div className="grid grid-cols-3 gap-2 text-[11px] pt-1">
             <div className="p-2 rounded bg-[#131520] border border-neutral-800 text-center">
-              <span className="text-slate-400 block text-[10px]">TP1 (1:2)</span>
-              <strong className="text-emerald-400 block mt-0.5">+${expectedGainTp1}</strong>
+              <span className="text-slate-400 block text-[10px]">Entry Reference</span>
+              <strong className="text-white block mt-0.5">${fixedGoldLevels.entryPrice.toFixed(2)}</strong>
             </div>
 
-            <div className="p-2 rounded bg-[#131520] border border-neutral-800 text-center">
-              <span className="text-slate-400 block text-[10px]">TP2 (1:3.5)</span>
-              <strong className="text-emerald-400 block mt-0.5">+${expectedGainTp2}</strong>
+            <div className="p-2 rounded bg-rose-950/25 border border-rose-500/30 text-center">
+              <span className="text-rose-400 block text-[10px]">SL ({FIXED_SL_RR}RR · -${dollarRisk.toFixed(0)})</span>
+              <strong className="text-rose-300 block mt-0.5">${fixedGoldLevels.stopLoss.toFixed(2)}</strong>
             </div>
 
-            <div className="p-2 rounded bg-[#131520] border border-neutral-800 text-center">
-              <span className="text-slate-400 block text-[10px]">TP3 (Monthly)</span>
-              <strong className="text-amber-400 block mt-0.5">+${expectedGainTp3}</strong>
+            <div className="p-2 rounded bg-emerald-950/25 border border-emerald-500/30 text-center">
+              <span className="text-emerald-400 block text-[10px]">TP ({FIXED_TP_RR}RR · +${expectedGainTp.toFixed(0)})</span>
+              <strong className="text-emerald-300 block mt-0.5">${fixedGoldLevels.takeProfit.toFixed(2)}</strong>
             </div>
           </div>
         </div>

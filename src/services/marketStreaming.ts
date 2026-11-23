@@ -143,7 +143,7 @@ class MarketStreamingService {
     const now = Date.now();
     let hasLiveFeed = false;
 
-    for (const key of ['XAUUSD', 'AUDUSD', 'NASDAQ'] as InstrumentId[]) {
+    for (const key of ['XAUUSD', 'EURUSD', 'NASDAQ'] as InstrumentId[]) {
       const q = rawQuotes[key];
       if (q && q.price > 0 && q.status === 'LIVE') {
         hasLiveFeed = true;
